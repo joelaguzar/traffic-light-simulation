@@ -1,14 +1,12 @@
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import numpy as np
 import os
 
-# Visual theme for the various traffic volume scenarios
 COLORS = {
-    "low_traffic": "#2ecc71",   # Emerald green
-    "normal":      "#3498db",   # Sky blue
-    "rush_hour":   "#e74c3c",   # Crimson red
-    "optimized":   "#9b59b6",   # Amethyst purple
+    "low_traffic": "#2ecc71",
+    "normal":      "#3498db",
+    "rush_hour":   "#e74c3c",
+    "optimized":   "#9b59b6",
 }
 
 LANE_COLORS = ["#5dade2", "#f1948a", "#82e0aa", "#f9e79f"]
