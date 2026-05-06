@@ -16,22 +16,21 @@ sys.path.insert(0, os.path.dirname(__file__))
 from simulation import TrafficSimulation
 from config import DIRECTIONS, SCENARIOS
 
-# ── Styling & Color Palette ─────────────────────────────────────────────────
 COLORS = {
-    "bg": "#0f172a",         # Deep Slate
-    "panel": "#1e293b",      # Slate 800
-    "accent": "#38bdf8",     # Sky Blue
-    "road": "#334155",       # Slate 700
-    "road_line": "#94a3b8",  # Slate 400
-    "grass": "#064e3b",      # Dark Emerald
-    "text": "#f8fafc",       # Slate 50
-    "text_dim": "#94a3b8",   # Slate 400
-    "GREEN": "#10b981",      # Emerald 500
-    "RED": "#ef4444",        # Red 500
-    "YELLOW": "#f59e0b",     # Amber 500
-    "OFF": "#1e293b",        # Inactive light color
-    "SIDEWALK": "#475569",   # Slate 600
-    "MARKING": "#ffffff",    # White
+    "bg": "#0f172a",
+    "panel": "#1e293b",
+    "accent": "#38bdf8",
+    "road": "#334155",
+    "road_line": "#94a3b8",
+    "grass": "#064e3b",
+    "text": "#f8fafc",
+    "text_dim": "#94a3b8",
+    "GREEN": "#10b981",
+    "RED": "#ef4444",
+    "YELLOW": "#f59e0b",
+    "OFF": "#1e293b",
+    "SIDEWALK": "#475569",
+    "MARKING": "#ffffff",
 }
 
 # Assign distinct colors to vehicles based on their origin direction (for stats panel)
@@ -73,7 +72,7 @@ class TrafficGUI:
         # UI & Animation State
         self.paused = False
         self.speed_multiplier = 1.0
-        self.update_interval_ms = 16    # Target ~60 FPS
+        self.update_interval_ms = 16
         self.sim_delta_per_step = 0.16 
         
         self._setup_window()
@@ -83,12 +82,12 @@ class TrafficGUI:
         
         # Object tracking for animation
         self.vehicle_objects = {d: [] for d in DIRECTIONS}
-        self.passing_vehicles = []      # Vehicles currently in the intersection
-        self.arriving_vehicles = []     # Vehicles approaching the stop line
+        self.passing_vehicles = []
+        self.arriving_vehicles = []
         self.last_departed_idx = 0
         self.last_arrivals = {d: 0 for d in DIRECTIONS}
-        self.anim_objects = {}          # Maps IDs to Canvas item collections
-        self.arriving_vehicle_ids = set()  # Track vehicle IDs that already have sprites
+        self.anim_objects = {}
+        self.arriving_vehicle_ids = set()
         
         self._schedule_update()
 
@@ -110,7 +109,7 @@ class TrafficGUI:
             self.font_label = ("Helvetica", 10, "bold")
 
     def _build_layout(self):
-        # ── Header & Info Bar ──
+        # Header and info bar
         header = tk.Frame(self.root, bg=COLORS["bg"], pady=15)
         header.pack(fill=tk.X)
         
@@ -127,7 +126,7 @@ class TrafficGUI:
         tk.Label(title_frame, text=scenario_desc, 
                  fg=COLORS["text_dim"], bg=COLORS["bg"], font=("Segoe UI", 9, "italic")).pack(anchor="w")
 
-        # ── Global Progress Indicator ──
+        # Global Progress Indicator
         progress_frame = tk.Frame(header, bg=COLORS["bg"], padx=30)
         progress_frame.pack(side=tk.RIGHT, fill=tk.Y)
         
@@ -141,7 +140,7 @@ class TrafficGUI:
                                      bg=COLORS["bg"], font=self.font_stat)
         self.lbl_progress.pack(anchor="e")
 
-        # ── Main Viewport ──
+        # Main Viewport
         main_frame = tk.Frame(self.root, bg=COLORS["bg"])
         main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
 
@@ -160,7 +159,7 @@ class TrafficGUI:
         self.panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(15, 0))
         self.panel.pack_propagate(False)
 
-        # ── Telemetry & Statistics ──
+        # Telemetry & Statistics
         self._create_panel_section("📊 REAL-TIME STATS")
         self.stat_time = self._create_stat_row("⏱ Time Elapsed", "0s / 0s")
         self.stat_phase = self._create_stat_row("🚦 Current Phase", "Initializing...")

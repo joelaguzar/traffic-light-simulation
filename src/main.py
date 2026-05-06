@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
 """
 Entry point for the Traffic Light Simulation.
-This script runs the simulation across multiple traffic scenarios, 
+This script runs the simulation across multiple traffic scenarios,
 collects performance data, and generates visual charts for analysis.
 """
 
 import sys
 import os
 
-# Ensure we can import from the current directory
 sys.path.insert(0, os.path.dirname(__file__))
 
 from simulation import TrafficSimulation
 from data_collector import save_vehicle_data, save_summary, print_summary_table
 import charts as chart_module
 
-# Define which scenarios we want to simulate
 SCENARIO_NAMES = ["low_traffic", "normal", "rush_hour"]
 
-# Setup paths for output data and charts
 BASE_DIR   = os.path.dirname(os.path.dirname(__file__))
 DATA_DIR   = os.path.join(BASE_DIR, "data")
 CHARTS_DIR = os.path.join(BASE_DIR, "charts")
@@ -34,22 +31,17 @@ def run_all_scenarios():
     for scenario in SCENARIO_NAMES:
         print(f"\n▶ Starting simulation: {scenario.upper().replace('_', ' ')}")
         
-        # Initialize and run the SimPy environment for this specific traffic volume
         sim = TrafficSimulation(scenario)
         results = sim.run()
         all_results.append(results)
 
-        # Record individual vehicle metrics to CSV
         save_vehicle_data(results, output_dir=DATA_DIR)
 
-    # Generate a comparative summary across all tested scenarios
     print()
     save_summary(all_results, output_dir=DATA_DIR)
 
-    # Display a quick results table in the console
     print_summary_table(all_results)
 
-    # Create visual comparisons (wait times, throughput, etc.)
     chart_module.generate_all_charts(all_results, output_dir=CHARTS_DIR)
 
     print("\n✓ Processing complete. Results are available in /data and /charts.")
