@@ -1,5 +1,5 @@
 # CS 324 — Traffic Light Simulation
-**Batangas State University | Alangilan Campus**  
+
 **CS 324: Modeling and Simulation | AY 2025–2026**
 
 ---
