@@ -50,13 +50,6 @@ python src/gui.py rush_hour        # specific scenario
 python src/gui.py low_traffic
 ```
 
-### Unit tests
-```bash
-python -m pytest tests/ -v
-# or
-python tests/test_simulation.py
-```
-
 ---
 
 ## Project Structure
