@@ -845,7 +845,6 @@ class TrafficGUI:
             self.arriving_vehicles.remove(found_arriving)
             self.arriving_vehicle_ids.discard(vehicle_id)
             existing_sprite_items = self.anim_objects.pop(found_arriving['id'], None)
-
             departed_v = next(
                 (v for v in self.sim.departed_vehicles 
                  if v.vehicle_id == vehicle_id), None)
