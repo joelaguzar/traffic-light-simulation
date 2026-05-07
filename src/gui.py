@@ -403,21 +403,57 @@ class TrafficGUI:
         """Applies frame-by-frame coordinate shifts to active vehicle sprites."""
         current_pos = {}
         
+        # Pre-populate current_pos with un-updated positions for safe collision detection
+        for v in self.passing_vehicles:
+            vid = int(v['id'].split('_')[1])
+            current_pos[vid] = v
+        for v in self.arriving_vehicles:
+            vid = v['vehicle_obj'].vehicle_id
+            current_pos[vid] = v
+
         # Handle vehicles exiting the intersection
         remaining_passing = []
-        for v in self.passing_vehicles:
+        for i, v in enumerate(self.passing_vehicles):
             speed = v.get('speed', 120)
-            v['x'] += v['dx'] * speed * delta
-            v['y'] += v['dy'] * speed * delta
+            
+            # Find car ahead in passing_vehicles
+            ahead_vid = None
+            for j in range(i - 1, -1, -1):
+                pass_v = self.passing_vehicles[j]
+                if pass_v['dir'] == v['dir'] and pass_v['lane'] == v['lane']:
+                    ahead_vid = int(pass_v['id'].split('_')[1])
+                    break
+                    
+            ahead_limit = None
+            if ahead_vid is not None and ahead_vid in current_pos:
+                ahead_v = current_pos[ahead_vid]
+                ahead_length = VEHICLE_CONFIGS[ahead_v['type']]["height"]
+                my_length = VEHICLE_CONFIGS[v['type']]["height"]
+                gap_size = 10 + ahead_length / 2 + my_length / 2
+                
+                if v['dir'] == "North": ahead_limit = ahead_v['y'] - gap_size
+                elif v['dir'] == "South": ahead_limit = ahead_v['y'] + gap_size
+                elif v['dir'] == "East": ahead_limit = ahead_v['x'] + gap_size
+                elif v['dir'] == "West": ahead_limit = ahead_v['x'] - gap_size
+
+            # Move
+            new_x = v['x'] + v['dx'] * speed * delta
+            new_y = v['y'] + v['dy'] * speed * delta
+            
+            if ahead_limit is not None:
+                if v['dir'] == "North": new_y = min(new_y, ahead_limit)
+                elif v['dir'] == "South": new_y = max(new_y, ahead_limit)
+                elif v['dir'] == "East": new_x = max(new_x, ahead_limit)
+                elif v['dir'] == "West": new_x = min(new_x, ahead_limit)
+                
+            v['x'] = new_x
+            v['y'] = new_y
+            
             if -50 < v['x'] < self.CANVAS_W + 50 and -50 < v['y'] < self.CANVAS_H + 50:
                 remaining_passing.append(v)
                 vid = int(v['id'].split('_')[1])
                 current_pos[vid] = v
         self.passing_vehicles = remaining_passing
-
-        for v in self.arriving_vehicles:
-            vid = v['vehicle_obj'].vehicle_id
-            current_pos[vid] = v
 
         # Handle vehicles approaching the intersection
         remaining_arriving = []
@@ -488,6 +524,7 @@ class TrafficGUI:
                     v['x'] += speed * delta
                     if v['x'] > target_x: v['x'] = target_x
                 
+            current_pos[vobj.vehicle_id] = v
             remaining_arriving.append(v)
             
         self.arriving_vehicles = remaining_arriving
