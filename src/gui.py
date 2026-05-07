@@ -499,8 +499,6 @@ class TrafficGUI:
             v['y'] += v['dy'] * speed * delta
             if -50 < v['x'] < self.CANVAS_W + 50 and -50 < v['y'] < self.CANVAS_H + 50:
                 remaining_passing.append(v)
-                vid = int(v['id'].split('_')[1])
-                current_pos[vid] = v
         self.passing_vehicles = remaining_passing
 
         # Handle vehicles approaching the intersection
@@ -524,30 +522,25 @@ class TrafficGUI:
             # Move towards target
             if d == "North":
                 target_y = cy - stop_dist
-                if ahead_limit is not None: target_y = min(target_y, ahead_limit)
                 if v['y'] < target_y:
                     v['y'] += speed * delta
                     if v['y'] > target_y: v['y'] = target_y
             elif d == "South":
                 target_y = cy + stop_dist
-                if ahead_limit is not None: target_y = max(target_y, ahead_limit)
                 if v['y'] > target_y:
                     v['y'] -= speed * delta
                     if v['y'] < target_y: v['y'] = target_y
             elif d == "East":
                 target_x = cx + stop_dist
-                if ahead_limit is not None: target_x = max(target_x, ahead_limit)
                 if v['x'] > target_x:
                     v['x'] -= speed * delta
                     if v['x'] < target_x: v['x'] = target_x
             elif d == "West":
                 target_x = cx - stop_dist
-                if ahead_limit is not None: target_x = min(target_x, ahead_limit)
                 if v['x'] < target_x:
                     v['x'] += speed * delta
                     if v['x'] > target_x: v['x'] = target_x
                 
-            current_pos[vobj.vehicle_id] = v
             remaining_arriving.append(v)
             
         self.arriving_vehicles = remaining_arriving
