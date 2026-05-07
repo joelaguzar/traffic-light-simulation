@@ -4,6 +4,7 @@
 SCENARIOS = {
     "low_traffic": {
         "arrival_rate": 5 / 60,
+        "pedestrian_rate": 2 / 60,
         "green_duration": 30,
         "yellow_duration": 5,
         "departure_interval": 1.0,
@@ -13,6 +14,7 @@ SCENARIOS = {
     },
     "normal": {
         "arrival_rate": 10 / 60,
+        "pedestrian_rate": 5 / 60,
         "green_duration": 30,
         "yellow_duration": 5,
         "departure_interval": 1.0,
@@ -22,6 +24,7 @@ SCENARIOS = {
     },
     "rush_hour": {
         "arrival_rate": 20 / 60,
+        "pedestrian_rate": 10 / 60,
         "green_duration": 45,
         "yellow_duration": 5,
         "departure_interval": 1.0,
@@ -31,6 +34,7 @@ SCENARIOS = {
     },
     "optimized": {
         "arrival_rate": 20 / 60,
+        "pedestrian_rate": 10 / 60,
         "green_duration": 60,
         "yellow_duration": 5,
         "departure_interval": 1.0,

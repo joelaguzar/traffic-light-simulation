@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from vehicle import Vehicle
 from traffic_light import TrafficLight
+from pedestrian import Pedestrian
 from config import SCENARIOS, DIRECTIONS, PHASES
 
 class TrafficSimulation:
@@ -30,19 +31,28 @@ class TrafficSimulation:
 
         # Each scenario run should start with vehicle ID 1
         Vehicle.reset_counter()
+        Pedestrian.reset_counter()
 
         # Initialize hardware: 4 lights and 4 FIFO queues
         self.lights = {
             d: TrafficLight(self.env, d, self.config)
             for d in DIRECTIONS
         }
+        self.pedestrian_lights = {
+            d: TrafficLight(self.env, f"Ped_{d}", self.config)
+            for d in DIRECTIONS
+        }
         self.queues = {d: [] for d in DIRECTIONS}
+        self.pedestrian_queues = {d: [] for d in DIRECTIONS}
         self.lane_counters = {d: 0 for d in DIRECTIONS}  # For alternating lane assignment
 
         self.departed_vehicles = []
+        self.departed_pedestrians = []
         self.stats = {
             "total_arrived": 0,
             "total_departed": 0,
+            "pedestrians_arrived": 0,
+            "pedestrians_departed": 0,
             "arrivals_per_dir": {d: 0 for d in DIRECTIONS},
             "max_queue": {d: 0 for d in DIRECTIONS}
         }
@@ -63,27 +73,35 @@ class TrafficSimulation:
             # North-South green light phase
             for d in PHASES["phase_A"]:
                 self.lights[d].set_state("GREEN")
+                self.pedestrian_lights[d].set_state("RED")
             for d in PHASES["phase_B"]:
                 self.lights[d].set_state("RED")
+                self.pedestrian_lights[d].set_state("GREEN")
 
             yield self.env.timeout(green)
 
             # Warning period before switching directions
             for d in PHASES["phase_A"]:
                 self.lights[d].set_state("YELLOW")
+            for d in DIRECTIONS:
+                self.pedestrian_lights[d].set_state("RED") # All ped lights red during yellow
             yield self.env.timeout(yellow)
 
             # East-West green light phase
             for d in PHASES["phase_B"]:
                 self.lights[d].set_state("GREEN")
+                self.pedestrian_lights[d].set_state("RED")
             for d in PHASES["phase_A"]:
                 self.lights[d].set_state("RED")
+                self.pedestrian_lights[d].set_state("GREEN")
 
             yield self.env.timeout(green)
 
             # Warning period for East-West
             for d in PHASES["phase_B"]:
                 self.lights[d].set_state("YELLOW")
+            for d in DIRECTIONS:
+                self.pedestrian_lights[d].set_state("RED")
             yield self.env.timeout(yellow)
 
     def vehicle_arrival(self, direction):
@@ -143,6 +161,36 @@ class TrafficSimulation:
                 if not self.lights[direction].is_green():
                     was_green = False
 
+    def pedestrian_arrival(self, direction):
+        rate = self.config.get("pedestrian_rate", 5 / 60)
+        while True:
+            inter_arrival = np.random.exponential(1.0 / rate)
+            yield self.env.timeout(inter_arrival)
+            
+            pedestrian = Pedestrian(direction, self.env.now)
+            self.pedestrian_queues[direction].append(pedestrian)
+            self.stats["pedestrians_arrived"] += 1
+
+    def pedestrian_crossing(self, direction):
+        was_green = False
+        while True:
+            yield self.env.timeout(0.05)
+            
+            if self.pedestrian_lights[direction].is_green() and self.pedestrian_queues[direction]:
+                if not was_green:
+                    was_green = True
+                
+                pedestrian = self.pedestrian_queues[direction].pop(0)
+                pedestrian.start_crossing(self.env.now)
+                self.departed_pedestrians.append(pedestrian)
+                self.stats["pedestrians_departed"] += 1
+                
+                # Small gap between pedestrians starting to cross
+                yield self.env.timeout(0.5)
+            else:
+                if not self.pedestrian_lights[direction].is_green():
+                    was_green = False
+
     def queue_monitor(self):
         """
         Snapshots queue lengths every minute for time-series visualization.
@@ -162,6 +210,8 @@ class TrafficSimulation:
             # Two independent lane processes per direction for true parallel flow
             self.env.process(self.vehicle_departure_lane(direction, 0))
             self.env.process(self.vehicle_departure_lane(direction, 1))
+            self.env.process(self.pedestrian_arrival(direction))
+            self.env.process(self.pedestrian_crossing(direction))
         self._started = True
 
     def step(self, delta=1.0):

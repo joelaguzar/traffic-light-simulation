@@ -88,6 +88,12 @@ class TrafficGUI:
         self.last_arrivals = {d: 0 for d in DIRECTIONS}
         self.anim_objects = {}
         self.arriving_vehicle_ids = set()
+
+        self.passing_pedestrians = []
+        self.arriving_pedestrians = []
+        self.last_departed_ped_idx = 0
+        self.last_ped_arrivals = {d: 0 for d in DIRECTIONS}
+        self.arriving_ped_ids = set()
         
         self._schedule_update()
 
@@ -165,6 +171,8 @@ class TrafficGUI:
         self.stat_phase = self._create_stat_row("🚦 Current Phase", "Initializing...")
         self.stat_arrived = self._create_stat_row("🚗 Total Arrived", "0")
         self.stat_departed = self._create_stat_row("🏁 Total Departed", "0")
+        self.stat_ped_arrived = self._create_stat_row("🚶 Peds Arrived", "0")
+        self.stat_ped_departed = self._create_stat_row("🏁 Peds Crossed", "0")
         self.stat_avg_wait = self._create_stat_row("⌛ Avg Wait", "0.0s")
         
         self._create_panel_section("🛣 LANE QUEUES")
@@ -224,6 +232,28 @@ class TrafficGUI:
         
         # Ground layer
         self.canvas.create_rectangle(0, 0, w, h, fill=COLORS["grass"], outline="")
+        
+        # Scenery (Trees and Bushes)
+        rng = random.Random(42)
+        sw = 15
+        regions = [
+            (20, 20, cx - rw - sw - 30, cy - rw - sw - 30), # top-left
+            (cx + rw + sw + 30, 20, w - 20, cy - rw - sw - 30), # top-right
+            (20, cy + rw + sw + 30, cx - rw - sw - 30, h - 20), # bottom-left
+            (cx + rw + sw + 30, cy + rw + sw + 30, w - 20, h - 20) # bottom-right
+        ]
+        for x1, y1, x2, y2 in regions:
+            if x2 > x1 and y2 > y1:
+                for _ in range(rng.randint(4, 8)):
+                    tx, ty = rng.uniform(x1, x2), rng.uniform(y1, y2)
+                    tr = rng.uniform(15, 25)
+                    self.canvas.create_oval(tx-tr+3, ty-tr+3, tx+tr+3, ty+tr+3, fill="#064e3b", outline="")
+                    self.canvas.create_oval(tx-tr, ty-tr, tx+tr, ty+tr, fill="#166534", outline="#14532d", width=1)
+                    self.canvas.create_oval(tx-tr*0.6, ty-tr*0.6, tx+tr*0.4, ty+tr*0.4, fill="#15803d", outline="")
+                for _ in range(rng.randint(3, 7)):
+                    bx, by = rng.uniform(x1, x2), rng.uniform(y1, y2)
+                    br = rng.uniform(6, 12)
+                    self.canvas.create_oval(bx-br, by-br, bx+br, by+br, fill="#4ade80", outline="#22c55e", width=1)
         
         # Sidewalk logic
         sw = 15 
@@ -291,6 +321,26 @@ class TrafficGUI:
                 lx, ly = (hx, hy - 12 + i * 12) if horient == "v" else (hx - 12 + i * 12, hy)
                 bulb = self.canvas.create_oval(lx-5, ly-5, lx+5, ly+5, fill=COLORS["OFF"], outline="#1e293b", width=1)
                 self.lights[d][color].append(bulb)
+        
+        # Pedestrian lights
+        self.ped_lights = {}
+        for d in DIRECTIONS:
+            self.ped_lights[d] = {"RED": [], "GREEN": []}
+            if d == "North":
+                pos = [(cx - rw - 15, cy - rw - 55), (cx + rw + 15, cy - rw - 55)]
+            elif d == "South":
+                pos = [(cx - rw - 15, cy + rw + 55), (cx + rw + 15, cy + rw + 55)]
+            elif d == "East":
+                pos = [(cx + rw + 55, cy - rw - 15), (cx + rw + 55, cy + rw + 15)]
+            else: # West
+                pos = [(cx - rw - 55, cy - rw - 15), (cx - rw - 55, cy + rw + 15)]
+                
+            for px, py in pos:
+                self.canvas.create_rectangle(px-8, py-16, px+8, py+16, fill="#0f172a", outline="#334155", width=2)
+                r_bulb = self.canvas.create_oval(px-6, py-14, px+6, py-2, fill=COLORS["OFF"], outline="#1e293b", width=1)
+                g_bulb = self.canvas.create_oval(px-6, py+2, px+6, py+14, fill=COLORS["OFF"], outline="#1e293b", width=1)
+                self.ped_lights[d]["RED"].append(r_bulb)
+                self.ped_lights[d]["GREEN"].append(g_bulb)
 
     def _toggle_pause(self):
         self.paused = not self.paused
@@ -310,6 +360,7 @@ class TrafficGUI:
             
             self._detect_sim_changes()
             self._move_animated_vehicles(delta)
+            self._move_animated_pedestrians(delta)
             self._sync_canvas()
             self._update_panel_stats()
             
@@ -336,6 +387,12 @@ class TrafficGUI:
                 for _ in range(current_arrivals - self.last_arrivals[d]):
                     self._create_arriving_vehicle(d)
                 self.last_arrivals[d] = current_arrivals
+                
+        # Trigger passing animations for pedestrians
+        new_departed_peds = sim.departed_pedestrians[self.last_departed_ped_idx:]
+        for p in new_departed_peds:
+            self._create_passing_pedestrian(p)
+        self.last_departed_ped_idx = len(sim.departed_pedestrians)
 
     def _update_panel_stats(self):
         """Refreshes the sidebar with current data points."""
@@ -354,6 +411,8 @@ class TrafficGUI:
         
         self.stat_arrived.config(text=f"{sim.stats['total_arrived']} vehicles")
         self.stat_departed.config(text=f"{sim.stats['total_departed']} vehicles")
+        self.stat_ped_arrived.config(text=f"{sim.stats['pedestrians_arrived']} arrived")
+        self.stat_ped_departed.config(text=f"{sim.stats['pedestrians_departed']} crossed")
         
         res = sim.get_results()
         self.stat_avg_wait.config(text=f"{res['avg_wait_time']:.1f}s")
@@ -643,6 +702,52 @@ class TrafficGUI:
             
         self.passing_vehicles.append(v)
 
+
+    def _create_passing_pedestrian(self, p):
+        cx, cy, rw = self.CX, self.CY, self.ROAD_W
+        v = {
+            'id': f"ped_{p.pedestrian_id}", 'dir': p.direction,
+            'color': "#f8fafc", 'x': 0, 'y': 0, 'dx': 0, 'dy': 0,
+            'speed': random.uniform(30, 50)
+        }
+        if p.direction == "North":
+            side = random.choice([-1, 1])
+            v['x'] = cx + side * (rw + 25)
+            v['y'] = cy - rw - 25 + random.uniform(-4, 4)
+            v['dx'] = -side
+        elif p.direction == "South":
+            side = random.choice([-1, 1])
+            v['x'] = cx + side * (rw + 25)
+            v['y'] = cy + rw + 25 + random.uniform(-4, 4)
+            v['dx'] = -side
+        elif p.direction == "East":
+            side = random.choice([-1, 1])
+            v['x'] = cx + rw + 25 + random.uniform(-4, 4)
+            v['y'] = cy + side * (rw + 25)
+            v['dy'] = -side
+        elif p.direction == "West":
+            side = random.choice([-1, 1])
+            v['x'] = cx - rw - 25 + random.uniform(-4, 4)
+            v['y'] = cy + side * (rw + 25)
+            v['dy'] = -side
+            
+        self.passing_pedestrians.append(v)
+
+    def _move_animated_pedestrians(self, delta):
+        remaining_peds = []
+        cx, cy, rw = self.CX, self.CY, self.ROAD_W
+        for p in self.passing_pedestrians:
+            p['x'] += p['dx'] * p['speed'] * delta
+            p['y'] += p['dy'] * p['speed'] * delta
+            if p['dir'] in ["North", "South"]:
+                if (p['dx'] < 0 and p['x'] < cx - rw - 15) or (p['dx'] > 0 and p['x'] > cx + rw + 15):
+                    continue
+            else:
+                if (p['dy'] < 0 and p['y'] < cy - rw - 15) or (p['dy'] > 0 and p['y'] > cy + rw + 15):
+                    continue
+            remaining_peds.append(p)
+        self.passing_pedestrians = remaining_peds
+
     def _sync_canvas(self):
         """High-level redraw: maps logical state to visual canvas objects."""
         active_ids = set()
@@ -657,8 +762,19 @@ class TrafficGUI:
                 for b_id in self.lights[d][state]:
                     self.canvas.itemconfig(b_id, fill=COLORS[state], outline="#fff", width=2)
                     self.canvas.tag_raise(b_id)
+
+        # Handle ped light visual states
+        for d in DIRECTIONS:
+            state = self.sim.pedestrian_lights[d].state
+            for color, bulb_ids in self.ped_lights[d].items():
+                for b_id in bulb_ids:
+                    self.canvas.itemconfig(b_id, fill=COLORS["OFF"], outline="#1e293b", width=1)
+            if state in self.ped_lights[d]:
+                for b_id in self.ped_lights[d][state]:
+                    c_val = "#22c55e" if state == "GREEN" else "#ef4444"
+                    self.canvas.itemconfig(b_id, fill=c_val, outline="#fff", width=2)
         
-        cx, cy, lane_offset = self.CX, self.CY, self.ROAD_W // 2
+        cx, cy, rw = self.CX, self.CY, self.ROAD_W
         
         # Render static queued vehicles (those that have arrived at their stop position)
         for d in DIRECTIONS:
@@ -691,6 +807,33 @@ class TrafficGUI:
                 else: x, y, orient = cx - dist, cy + off, "h"
                 
                 self._update_or_create_car(v_id, x, y, orient, vobj.color, vobj.v_type)
+
+        # Render queued pedestrians
+        for d in DIRECTIONS:
+            queue = self.sim.pedestrian_queues[d]
+            for i, pobj in enumerate(queue):
+                v_id = f"q_ped_{d}_{pobj.pedestrian_id}"
+                active_ids.add(v_id)
+                side = -1 if i % 2 == 0 else 1
+                offset = (i // 2) * 8
+                if d == "North":
+                    x = cx + side * (rw + 25 + offset)
+                    y = cy - rw - 25
+                elif d == "South":
+                    x = cx + side * (rw + 25 + offset)
+                    y = cy + rw + 25
+                elif d == "East":
+                    x = cx + rw + 25
+                    y = cy + side * (rw + 25 + offset)
+                else: # West
+                    x = cx - rw - 25
+                    y = cy + side * (rw + 25 + offset)
+                self._update_or_create_pedestrian(v_id, x, y, "#f8fafc")
+
+        # Render moving pedestrians
+        for p in self.passing_pedestrians:
+            active_ids.add(p['id'])
+            self._update_or_create_pedestrian(p['id'], p['x'], p['y'], p['color'])
 
         # Render moving vehicles
         for v_list in [self.passing_vehicles, self.arriving_vehicles]:
@@ -749,6 +892,31 @@ class TrafficGUI:
                 self.canvas.coords(items[4], x-w*0.45, y-h*0.4, x-w*0.4, y-h*0.2)
                 self.canvas.coords(items[5], x-w*0.45, y+h*0.2, x-w*0.4, y+h*0.4)
             for item in items: self.canvas.tag_raise(item)
+
+
+    def _update_or_create_pedestrian(self, vid, x, y, color):
+        if vid not in self.anim_objects:
+            shirt_color = random.choice(["#ef4444", "#3b82f6", "#eab308", "#10b981", "#a855f7", "#f97316", "#ec4899"])
+            # Head
+            head = self.canvas.create_oval(x-4, y-12, x+4, y-4, fill="#fcd34d", outline="#1e293b", width=1)
+            # Body
+            body = self.canvas.create_line(x, y-4, x, y+6, fill=shirt_color, width=3)
+            # Arms
+            arms = self.canvas.create_line(x-6, y, x+6, y, fill=shirt_color, width=2)
+            # Legs
+            leg1 = self.canvas.create_line(x, y+6, x-4, y+14, fill="#1e293b", width=2)
+            leg2 = self.canvas.create_line(x, y+6, x+4, y+14, fill="#1e293b", width=2)
+            
+            self.anim_objects[vid] = [head, body, arms, leg1, leg2]
+        else:
+            self.canvas.coords(self.anim_objects[vid][0], x-4, y-12, x+4, y-4)
+            self.canvas.coords(self.anim_objects[vid][1], x, y-4, x, y+6)
+            self.canvas.coords(self.anim_objects[vid][2], x-6, y, x+6, y)
+            self.canvas.coords(self.anim_objects[vid][3], x, y+6, x-4, y+14)
+            self.canvas.coords(self.anim_objects[vid][4], x, y+6, x+4, y+14)
+            
+        for item in self.anim_objects[vid]:
+            self.canvas.tag_raise(item)
 
     def _handle_completion(self):
         self.paused = True
