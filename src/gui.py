@@ -490,14 +490,23 @@ class TrafficGUI:
 
     def _move_animated_vehicles(self, delta):
         """Applies frame-by-frame coordinate shifts to active vehicle sprites."""
+        current_pos = {}
+        
         # Handle vehicles exiting the intersection
         remaining_passing = []
         for v in self.passing_vehicles:
-            v['x'] += v['dx'] * 120 * delta
-            v['y'] += v['dy'] * 120 * delta
+            speed = v.get('speed', 120)
+            v['x'] += v['dx'] * speed * delta
+            v['y'] += v['dy'] * speed * delta
             if -50 < v['x'] < self.CANVAS_W + 50 and -50 < v['y'] < self.CANVAS_H + 50:
                 remaining_passing.append(v)
+                vid = int(v['id'].split('_')[1])
+                current_pos[vid] = v
         self.passing_vehicles = remaining_passing
+
+        for v in self.arriving_vehicles:
+            vid = v['vehicle_obj'].vehicle_id
+            current_pos[vid] = v
 
         # Handle vehicles approaching the intersection
         remaining_arriving = []
@@ -505,6 +514,7 @@ class TrafficGUI:
         for v in self.arriving_vehicles:
             d = v['dir']
             vobj = v['vehicle_obj']
+            speed = v.get('speed', 120)
             
             # Check if this vehicle is still in the queue
             try:
@@ -513,23 +523,62 @@ class TrafficGUI:
                 # Vehicle departed — will be handled by passing sprite
                 self.arriving_vehicle_ids.discard(vobj.vehicle_id)
                 continue
-                
-            stop_dist = self._get_stop_distance(d, q_idx)
-            v['x'] += v['dx'] * 120 * delta
-            v['y'] += v['dy'] * 120 * delta
+
+            my_lane = getattr(vobj, 'lane', 0)
+            my_length = VEHICLE_CONFIGS[v['type']]["height"]
             
-            reached = False
-            if d == "North" and v['y'] >= cy - stop_dist: reached = True
-            elif d == "South" and v['y'] <= cy + stop_dist: reached = True
-            elif d == "East" and v['x'] <= cx + stop_dist: reached = True
-            elif d == "West" and v['x'] >= cx - stop_dist: reached = True
+            ahead_vid = None
+            for j in range(q_idx - 1, -1, -1):
+                if getattr(self.sim.queues[d][j], 'lane', 0) == my_lane:
+                    ahead_vid = self.sim.queues[d][j].vehicle_id
+                    break
+            
+            if ahead_vid is None:
+                for pass_v in reversed(self.passing_vehicles):
+                    if pass_v['dir'] == d and pass_v['lane'] == my_lane:
+                        ahead_vid = int(pass_v['id'].split('_')[1])
+                        break
+
+            ahead_limit = None
+            if ahead_vid is not None and ahead_vid in current_pos:
+                ahead_v = current_pos[ahead_vid]
+                ahead_length = VEHICLE_CONFIGS[ahead_v['type']]["height"]
+                gap_size = 10 + ahead_length / 2 + my_length / 2
+                if d == "North": ahead_limit = ahead_v['y'] - gap_size
+                elif d == "South": ahead_limit = ahead_v['y'] + gap_size
+                elif d == "East": ahead_limit = ahead_v['x'] + gap_size
+                elif d == "West": ahead_limit = ahead_v['x'] - gap_size
+
+            stop_dist = self._get_stop_distance(d, q_idx)
+            
+            # Move towards target
+            if d == "North":
+                target_y = cy - stop_dist
+                if ahead_limit is not None: target_y = min(target_y, ahead_limit)
+                if v['y'] < target_y:
+                    v['y'] += speed * delta
+                    if v['y'] > target_y: v['y'] = target_y
+            elif d == "South":
+                target_y = cy + stop_dist
+                if ahead_limit is not None: target_y = max(target_y, ahead_limit)
+                if v['y'] > target_y:
+                    v['y'] -= speed * delta
+                    if v['y'] < target_y: v['y'] = target_y
+            elif d == "East":
+                target_x = cx + stop_dist
+                if ahead_limit is not None: target_x = max(target_x, ahead_limit)
+                if v['x'] > target_x:
+                    v['x'] -= speed * delta
+                    if v['x'] < target_x: v['x'] = target_x
+            elif d == "West":
+                target_x = cx - stop_dist
+                if ahead_limit is not None: target_x = min(target_x, ahead_limit)
+                if v['x'] < target_x:
+                    v['x'] += speed * delta
+                    if v['x'] > target_x: v['x'] = target_x
                 
-            if not reached:
-                remaining_arriving.append(v)
-            else:
-                # Vehicle reached stop position — remove from tracking so it
-                # becomes visible as a static queued sprite in _sync_canvas
-                self.arriving_vehicle_ids.discard(vobj.vehicle_id)
+            remaining_arriving.append(v)
+            
         self.arriving_vehicles = remaining_arriving
 
     def _get_pedestrian_wait_position(self, crossing, index):
@@ -639,7 +688,8 @@ class TrafficGUI:
         v = {
             'id': anim_id, 'vehicle_obj': vehicle_obj, 'dir': direction,
             'type': vehicle_obj.v_type, 'color': vehicle_obj.color,
-            'x': 0, 'y': 0, 'dx': 0, 'dy': 0, 'orient': 'v', 'lane': lane_id
+            'x': 0, 'y': 0, 'dx': 0, 'dy': 0, 'orient': 'v', 'lane': lane_id,
+            'speed': random.uniform(80, 160)
         }
         
         # Lane offsets: 2 lanes per direction, each 40px wide within the 80px half-road
@@ -750,9 +800,11 @@ class TrafficGUI:
         found_arriving = next(
             (v for v in self.arriving_vehicles 
              if v['vehicle_obj'].vehicle_id == vehicle_id), None)
+        v_speed = random.uniform(80, 160)
         if found_arriving:
             v_type, lane_id = found_arriving['type'], found_arriving['lane']
             v_color = found_arriving['color']
+            v_speed = found_arriving.get('speed', v_speed)
             self.arriving_vehicles.remove(found_arriving)
             self.arriving_vehicle_ids.discard(vehicle_id)
             existing_sprite_items = self.anim_objects.pop(found_arriving['id'], None)
@@ -789,7 +841,8 @@ class TrafficGUI:
         v = {
             'id': pass_id, 'dir': direction, 'type': v_type,
             'color': v_color, 'x': start_x, 'y': start_y,
-            'dx': 0, 'dy': 0, 'orient': 'v', 'lane': lane_id
+            'dx': 0, 'dy': 0, 'orient': 'v', 'lane': lane_id,
+            'speed': v_speed
         }
         
         if direction == "North": v['dy'], v['orient'] = 1, 'v'
