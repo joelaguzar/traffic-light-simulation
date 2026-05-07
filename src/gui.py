@@ -476,25 +476,25 @@ class TrafficGUI:
         """Determines exactly where a vehicle should stop in the queue to avoid overlapping."""
         queue = self.sim.queues[direction]
         if q_idx >= len(queue): return 1000
-        
-        vehicle = queue[q_idx]
-        my_slot = getattr(vehicle, 'queue_slot', q_idx)
-        my_height = VEHICLE_CONFIGS[getattr(vehicle, 'v_type', 'car')]["height"]
-        
-        stop_line_dist = 115
-        slot_gap = 32
 
-        return stop_line_dist + my_height / 2 + my_slot * slot_gap
+        vehicle = queue[q_idx]
+        return self._get_vehicle_stop_offset(direction, vehicle)
+
+    def _get_vehicle_stop_offset(self, direction, vehicle):
+        """Returns the center-point distance from the stop line for a queued vehicle."""
+        queue_slot = getattr(vehicle, 'queue_slot', 0)
+        stop_line_dist = 115
+        slot_gap = 42
+        my_height = VEHICLE_CONFIGS.get(getattr(vehicle, 'v_type', 'car'), VEHICLE_CONFIGS['car'])["height"]
+        return stop_line_dist + my_height / 2 + queue_slot * slot_gap
 
     def _move_animated_vehicles(self, delta):
         """Applies frame-by-frame coordinate shifts to active vehicle sprites."""
-        speed = 120 # Pixels per sim-second
-        
         # Handle vehicles exiting the intersection
         remaining_passing = []
         for v in self.passing_vehicles:
-            v['x'] += v['dx'] * speed * delta
-            v['y'] += v['dy'] * speed * delta
+            v['x'] += v['dx'] * 120 * delta
+            v['y'] += v['dy'] * 120 * delta
             if -50 < v['x'] < self.CANVAS_W + 50 and -50 < v['y'] < self.CANVAS_H + 50:
                 remaining_passing.append(v)
         self.passing_vehicles = remaining_passing
@@ -515,8 +515,8 @@ class TrafficGUI:
                 continue
                 
             stop_dist = self._get_stop_distance(d, q_idx)
-            v['x'] += v['dx'] * speed * delta
-            v['y'] += v['dy'] * speed * delta
+            v['x'] += v['dx'] * 120 * delta
+            v['y'] += v['dy'] * 120 * delta
             
             reached = False
             if d == "North" and v['y'] >= cy - stop_dist: reached = True
@@ -559,12 +559,8 @@ class TrafficGUI:
     def _get_vehicle_stop_position(self, direction, vehicle):
         cx, cy = self.CX, self.CY
         lane_id = getattr(vehicle, 'lane', 0)
-        queue_slot = getattr(vehicle, 'queue_slot', 0)
         lane_offset = 20 if lane_id == 0 else 55
-        my_height = VEHICLE_CONFIGS[getattr(vehicle, 'v_type', 'car')]["height"]
-        stop_line_dist = 115
-        slot_gap = 32
-        stop_offset = stop_line_dist + my_height / 2 + queue_slot * slot_gap
+        stop_offset = self._get_vehicle_stop_offset(direction, vehicle)
 
         if direction == "North":
             return cx + lane_offset, cy - stop_offset, "v"
@@ -755,12 +751,19 @@ class TrafficGUI:
             (v for v in self.arriving_vehicles 
              if v['vehicle_obj'].vehicle_id == vehicle_id), None)
         if found_arriving:
-            start_x, start_y = found_arriving['x'], found_arriving['y']
             v_type, lane_id = found_arriving['type'], found_arriving['lane']
             v_color = found_arriving['color']
             self.arriving_vehicles.remove(found_arriving)
             self.arriving_vehicle_ids.discard(vehicle_id)
             existing_sprite_items = self.anim_objects.pop(found_arriving['id'], None)
+
+            departed_v = next(
+                (v for v in self.sim.departed_vehicles 
+                 if v.vehicle_id == vehicle_id), None)
+            if departed_v is not None:
+                start_x, start_y, _ = self._get_vehicle_stop_position(direction, departed_v)
+            else:
+                start_x, start_y = found_arriving['x'], found_arriving['y']
         else:
             # No arriving sprite — vehicle was either a static queued sprite
             # or was never visible. Look up the departed vehicle's attributes.
