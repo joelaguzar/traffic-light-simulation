@@ -490,13 +490,11 @@ class TrafficGUI:
 
     def _move_animated_vehicles(self, delta):
         """Applies frame-by-frame coordinate shifts to active vehicle sprites."""
-        current_pos = {}
         speed = 120 # Pixels per sim-second
         
         # Handle vehicles exiting the intersection
         remaining_passing = []
         for v in self.passing_vehicles:
-            speed = v.get('speed', 120)
             v['x'] += v['dx'] * speed * delta
             v['y'] += v['dy'] * speed * delta
             if -50 < v['x'] < self.CANVAS_W + 50 and -50 < v['y'] < self.CANVAS_H + 50:
@@ -520,48 +518,38 @@ class TrafficGUI:
                 # Vehicle departed — will be handled by passing sprite
                 self.arriving_vehicle_ids.discard(vobj.vehicle_id)
                 continue
-
-            my_lane = getattr(vobj, 'lane', 0)
-            my_length = VEHICLE_CONFIGS[v['type']]["height"]
-            
-            ahead_vid = None
-            for j in range(q_idx - 1, -1, -1):
-                if getattr(self.sim.queues[d][j], 'lane', 0) == my_lane:
-                    ahead_vid = self.sim.queues[d][j].vehicle_id
-                    break
-            
-            if ahead_vid is None:
-                for pass_v in reversed(self.passing_vehicles):
-                    if pass_v['dir'] == d and pass_v['lane'] == my_lane:
-                        ahead_vid = int(pass_v['id'].split('_')[1])
-                        break
-
-            ahead_limit = None
-            if ahead_vid is not None and ahead_vid in current_pos:
-                ahead_v = current_pos[ahead_vid]
-                ahead_length = VEHICLE_CONFIGS[ahead_v['type']]["height"]
-                gap_size = 10 + ahead_length / 2 + my_length / 2
-                if d == "North": ahead_limit = ahead_v['y'] - gap_size
-                elif d == "South": ahead_limit = ahead_v['y'] + gap_size
-                elif d == "East": ahead_limit = ahead_v['x'] + gap_size
-                elif d == "West": ahead_limit = ahead_v['x'] - gap_size
-
-            stop_dist = self._get_stop_distance(d, q_idx)
-            v['x'] += v['dx'] * speed * delta
-            v['y'] += v['dy'] * speed * delta
-            
-            reached = False
-            if d == "North" and v['y'] >= cy - stop_dist: reached = True
-            elif d == "South" and v['y'] <= cy + stop_dist: reached = True
-            elif d == "East" and v['x'] <= cx + stop_dist: reached = True
-            elif d == "West" and v['x'] >= cx - stop_dist: reached = True
                 
-            if not reached:
-                remaining_arriving.append(v)
-            else:
-                # Vehicle reached stop position — remove from tracking so it
-                # becomes visible as a static queued sprite in _sync_canvas
-                self.arriving_vehicle_ids.discard(vobj.vehicle_id)
+            stop_dist = self._get_stop_distance(d, q_idx)
+            
+            # Move towards target
+            if d == "North":
+                target_y = cy - stop_dist
+                if ahead_limit is not None: target_y = min(target_y, ahead_limit)
+                if v['y'] < target_y:
+                    v['y'] += speed * delta
+                    if v['y'] > target_y: v['y'] = target_y
+            elif d == "South":
+                target_y = cy + stop_dist
+                if ahead_limit is not None: target_y = max(target_y, ahead_limit)
+                if v['y'] > target_y:
+                    v['y'] -= speed * delta
+                    if v['y'] < target_y: v['y'] = target_y
+            elif d == "East":
+                target_x = cx + stop_dist
+                if ahead_limit is not None: target_x = max(target_x, ahead_limit)
+                if v['x'] > target_x:
+                    v['x'] -= speed * delta
+                    if v['x'] < target_x: v['x'] = target_x
+            elif d == "West":
+                target_x = cx - stop_dist
+                if ahead_limit is not None: target_x = min(target_x, ahead_limit)
+                if v['x'] < target_x:
+                    v['x'] += speed * delta
+                    if v['x'] > target_x: v['x'] = target_x
+                
+            current_pos[vobj.vehicle_id] = v
+            remaining_arriving.append(v)
+            
         self.arriving_vehicles = remaining_arriving
 
     def _get_pedestrian_wait_position(self, crossing, index):
