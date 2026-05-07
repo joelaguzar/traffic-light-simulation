@@ -28,8 +28,11 @@ COLORS = {
     "GREEN": "#10b981",
     "RED": "#ef4444",
     "YELLOW": "#f59e0b",
+    "WALK": "#22c55e",
+    "DONT_WALK": "#ef4444",
     "OFF": "#1e293b",
     "SIDEWALK": "#475569",
+    "CURB": "#cbd5e1",
     "MARKING": "#ffffff",
 }
 
@@ -79,15 +82,23 @@ class TrafficGUI:
         self._build_layout()
         self._draw_static_elements()
         self._draw_traffic_lights()
+        self._draw_pedestrian_light()
         
         # Object tracking for animation
         self.vehicle_objects = {d: [] for d in DIRECTIONS}
+        self.pedestrian_objects = {d: [] for d in DIRECTIONS}
         self.passing_vehicles = []
         self.arriving_vehicles = []
+        self.walking_pedestrians = []
+        self.arriving_pedestrians = []
         self.last_departed_idx = 0
         self.last_arrivals = {d: 0 for d in DIRECTIONS}
+        self.last_ped_departed_idx = 0
+        self.last_ped_arrivals = {d: 0 for d in DIRECTIONS}
         self.anim_objects = {}
+        self.ped_anim_objects = {}
         self.arriving_vehicle_ids = set()
+        self.arriving_pedestrian_ids = set()
         
         self._schedule_update()
 
@@ -163,6 +174,7 @@ class TrafficGUI:
         self._create_panel_section("📊 REAL-TIME STATS")
         self.stat_time = self._create_stat_row("⏱ Time Elapsed", "0s / 0s")
         self.stat_phase = self._create_stat_row("🚦 Current Phase", "Initializing...")
+        self.stat_pedestrian = self._create_stat_row("🚶 Pedestrian Signal", "DONT WALK")
         self.stat_arrived = self._create_stat_row("🚗 Total Arrived", "0")
         self.stat_departed = self._create_stat_row("🏁 Total Departed", "0")
         self.stat_avg_wait = self._create_stat_row("⌛ Avg Wait", "0.0s")
@@ -172,6 +184,12 @@ class TrafficGUI:
         for d in DIRECTIONS:
             icon = "⬆" if d == "North" else "⬇" if d == "South" else "➡" if d == "East" else "⬅"
             self.lane_stats[d] = self._create_stat_row(f"{icon} {d} Lane", "RED | 0 cars", color=VEHICLE_COLORS[d])
+
+        self._create_panel_section("🚶 PEDESTRIAN QUEUES")
+        self.ped_lane_stats = {}
+        for d in DIRECTIONS:
+            icon = "⬆" if d == "North" else "⬇" if d == "South" else "➡" if d == "East" else "⬅"
+            self.ped_lane_stats[d] = self._create_stat_row(f"{icon} {d} Crossing", "0 waiting", color=COLORS["accent"])
 
         self._create_panel_section("SIMULATION CONTROLS")
         self.btn_pause = tk.Button(
@@ -221,9 +239,38 @@ class TrafficGUI:
         """Renders the intersection environment: roads, sidewalks, and markings."""
         cx, cy, rw = self.CX, self.CY, self.ROAD_W
         w, h = self.CANVAS_W, self.CANVAS_H
+
+        def draw_tree(x, y, scale=1.0):
+            trunk_w = 8 * scale
+            trunk_h = 24 * scale
+            crown_r = 18 * scale
+            self.canvas.create_rectangle(
+                x - trunk_w / 2, y, x + trunk_w / 2, y + trunk_h,
+                fill="#7c4a2d", outline=""
+            )
+            for dx, dy, mult in [
+                (0, -10 * scale, 1.05),
+                (-12 * scale, -2 * scale, 0.8),
+                (12 * scale, -2 * scale, 0.8),
+            ]:
+                r = crown_r * mult
+                self.canvas.create_oval(
+                    x + dx - r, y + dy - r, x + dx + r, y + dy + r,
+                    fill="#15803d", outline="#0f5132", width=2
+                )
         
         # Ground layer
         self.canvas.create_rectangle(0, 0, w, h, fill=COLORS["grass"], outline="")
+
+        # Tree clusters keep the outer field from feeling empty.
+        tree_positions = [
+            (70, 80, 1.0), (125, 45, 0.85), (50, 170, 1.1),
+            (w - 70, 80, 1.0), (w - 125, 45, 0.85), (w - 50, 170, 1.1),
+            (70, h - 80, 1.0), (125, h - 45, 0.85), (50, h - 170, 1.1),
+            (w - 70, h - 80, 1.0), (w - 125, h - 45, 0.85), (w - 50, h - 170, 1.1),
+        ]
+        for x, y, scale in tree_positions:
+            draw_tree(x, y, scale)
         
         # Sidewalk logic
         sw = 15 
@@ -231,6 +278,17 @@ class TrafficGUI:
         self.canvas.create_rectangle(0, cy + rw, w, cy + rw + sw, fill=COLORS["SIDEWALK"], outline="")
         self.canvas.create_rectangle(cx - rw - sw, 0, cx - rw, h, fill=COLORS["SIDEWALK"], outline="")
         self.canvas.create_rectangle(cx + rw, 0, cx + rw + sw, h, fill=COLORS["SIDEWALK"], outline="")
+
+        # Corner curb pads keep the crosswalk edges visually grounded.
+        curb = 18
+        for dx in (-1, 1):
+            for dy in (-1, 1):
+                x1 = cx + dx * (rw + sw - 2)
+                y1 = cy + dy * (rw + sw - 2)
+                self.canvas.create_rectangle(
+                    x1 - curb, y1 - curb, x1 + curb, y1 + curb,
+                    fill=COLORS["SIDEWALK"], outline=""
+                )
 
         # Road surface
         self.canvas.create_rectangle(0, cy - rw, w, cy + rw, fill=COLORS["road"], outline="")
@@ -245,8 +303,8 @@ class TrafficGUI:
         self.canvas.create_line(cx + rw + 30, cy, w, cy, fill=COLORS["MARKING"], width=2, dash=dash)
         
         # Zebra crossings
-        cw_w, stripe_w, gap = 25, 4, 6
-        for i in range(-rw + 5, rw - 5, stripe_w + gap):
+        cw_w, stripe_w, gap = 34, 5, 6
+        for i in range(-rw + 4, rw - 4, stripe_w + gap):
             self.canvas.create_rectangle(cx + i, cy - rw - cw_w, cx + i + stripe_w, cy - rw - 5, fill=COLORS["MARKING"], outline="")
             self.canvas.create_rectangle(cx + i, cy + rw + 5, cx + i + stripe_w, cy + rw + cw_w, fill=COLORS["MARKING"], outline="")
             self.canvas.create_rectangle(cx - rw - cw_w, cy + i, cx - rw - 5, cy + i + stripe_w, fill=COLORS["MARKING"], outline="")
@@ -292,6 +350,31 @@ class TrafficGUI:
                 bulb = self.canvas.create_oval(lx-5, ly-5, lx+5, ly+5, fill=COLORS["OFF"], outline="#1e293b", width=1)
                 self.lights[d][color].append(bulb)
 
+    def _draw_pedestrian_light(self):
+        """Draws dedicated pedestrian signals at opposite corners."""
+        cx, cy, rw = self.CX, self.CY, self.ROAD_W
+        signal_positions = [
+            (cx + rw + 58, cy - rw - 48, "v"),
+            (cx - rw - 58, cy + rw + 48, "v"),
+        ]
+
+        self.pedestrian_signal = []
+        for px, py, orient in signal_positions:
+            head = {"DONT_WALK": [], "WALK": [], "label": None}
+            self.canvas.create_line(px, py, px, py + 18, fill="#475569", width=4)
+            self.canvas.create_oval(px - 6, py + 18, px + 6, py + 30, fill="#1e293b", outline="#334155", width=1)
+            self.canvas.create_rectangle(px - 20, py - 30, px + 20, py + 10, fill="#0f172a", outline="#334155", width=2)
+            head["DONT_WALK"].append(
+                self.canvas.create_oval(px - 10, py - 24, px + 10, py - 6, fill=COLORS["DONT_WALK"], outline="#ffffff", width=2)
+            )
+            head["WALK"].append(
+                self.canvas.create_oval(px - 10, py + 0, px + 10, py + 18, fill=COLORS["OFF"], outline="#334155", width=1)
+            )
+            head["label"] = self.canvas.create_text(
+                px, py + 42, text="DON'T WALK", fill=COLORS["text"], font=("Segoe UI", 8, "bold")
+            )
+            self.pedestrian_signal.append(head)
+
     def _toggle_pause(self):
         self.paused = not self.paused
         self.btn_pause.config(text="▶ RESUME" if self.paused else "⏸ PAUSE",
@@ -310,6 +393,7 @@ class TrafficGUI:
             
             self._detect_sim_changes()
             self._move_animated_vehicles(delta)
+            self._move_animated_pedestrians(delta)
             self._sync_canvas()
             self._update_panel_stats()
             
@@ -337,19 +421,38 @@ class TrafficGUI:
                     self._create_arriving_vehicle(d)
                 self.last_arrivals[d] = current_arrivals
 
+        # Trigger pedestrian arrival animations and walking crossings
+        new_ped_departed = sim.departed_pedestrians[self.last_ped_departed_idx:]
+        for p in new_ped_departed:
+            self._create_walking_pedestrian(p.crossing, p.pedestrian_id)
+        self.last_ped_departed_idx = len(sim.departed_pedestrians)
+
+        for d in DIRECTIONS:
+            current_ped_arrivals = sim.stats["pedestrian_arrivals_per_crossing"][d]
+            if current_ped_arrivals > self.last_ped_arrivals[d]:
+                for _ in range(current_ped_arrivals - self.last_ped_arrivals[d]):
+                    self._create_arriving_pedestrian(d)
+                self.last_ped_arrivals[d] = current_ped_arrivals
+
     def _update_panel_stats(self):
         """Refreshes the sidebar with current data points."""
         sim = self.sim
         now, total = sim.env.now, sim.config["simulation_time"]
         self.stat_time.config(text=f"{int(now)}s / {total}s")
         
-        ns_state, ew_state = sim.lights["North"].state, sim.lights["East"].state
-        if ns_state == "GREEN":
-            phase = "PHASE A (N-S) 🟢"
-        elif ew_state == "GREEN":
-            phase = "PHASE B (E-W) 🟢"
+        ped_state = sim.pedestrian_light.state
+        self.stat_pedestrian.config(text=ped_state.replace("_", " "))
+
+        if ped_state == "WALK":
+            phase = "PEDESTRIAN CROSSING 🚶"
         else:
-            phase = "TRANSITION ⚠"
+            ns_state, ew_state = sim.lights["North"].state, sim.lights["East"].state
+            if ns_state == "GREEN":
+                phase = "PHASE A (N-S) 🟢"
+            elif ew_state == "GREEN":
+                phase = "PHASE B (E-W) 🟢"
+            else:
+                phase = "TRANSITION ⚠"
         self.stat_phase.config(text=phase)
         
         self.stat_arrived.config(text=f"{sim.stats['total_arrived']} vehicles")
@@ -366,6 +469,8 @@ class TrafficGUI:
             state = sim.lights[d].state
             q_len = len(sim.queues[d])
             self.lane_stats[d].config(text=f"{state} | {q_len} {'car' if q_len == 1 else 'cars'}", fg=COLORS[state])
+            ped_q_len = len(sim.pedestrian_queues[d])
+            self.ped_lane_stats[d].config(text=f"{ped_q_len} waiting", fg=COLORS["accent"])
 
     def _get_stop_distance(self, direction, q_idx):
         """Determines exactly where a vehicle should stop in the queue to avoid overlapping."""
@@ -373,31 +478,13 @@ class TrafficGUI:
         if q_idx >= len(queue): return 1000
         
         vehicle = queue[q_idx]
-        my_lane = getattr(vehicle, 'lane', 0)
+        my_slot = getattr(vehicle, 'queue_slot', q_idx)
         my_height = VEHICLE_CONFIGS[getattr(vehicle, 'v_type', 'car')]["height"]
         
         stop_line_dist = 115
-        gap = 10
-        
-        # Collect heights of vehicles AHEAD in the SAME lane
-        ahead_heights = []
-        for j in range(q_idx):
-            v = queue[j]
-            if getattr(v, 'lane', 0) == my_lane:
-                vt = getattr(v, 'v_type', 'car')
-                ahead_heights.append(VEHICLE_CONFIGS[vt]["height"])
-        
-        if not ahead_heights:
-            # First car in this lane
-            return stop_line_dist + my_height / 2
-        
-        # Stack: first car, then each subsequent car with gap
-        dist = stop_line_dist + ahead_heights[0] / 2
-        for k in range(1, len(ahead_heights)):
-            dist += ahead_heights[k - 1] / 2 + gap + ahead_heights[k] / 2
-        dist += ahead_heights[-1] / 2 + gap + my_height / 2
-        
-        return dist
+        slot_gap = 32
+
+        return stop_line_dist + my_height / 2 + my_slot * slot_gap
 
     def _move_animated_vehicles(self, delta):
         """Applies frame-by-frame coordinate shifts to active vehicle sprites."""
@@ -444,6 +531,89 @@ class TrafficGUI:
                 # becomes visible as a static queued sprite in _sync_canvas
                 self.arriving_vehicle_ids.discard(vobj.vehicle_id)
         self.arriving_vehicles = remaining_arriving
+
+    def _get_pedestrian_wait_position(self, crossing, index):
+        cx, cy, rw = self.CX, self.CY, self.ROAD_W
+        spacing = 16
+        curb_offset = 62
+
+        # Queue pedestrians on the grass corners, away from the road and crossing lane.
+        if crossing == "North":
+            return cx - 92 - index * spacing, cy - rw - curb_offset - index * 4
+        if crossing == "South":
+            return cx + 92 + index * spacing, cy + rw + curb_offset + index * 4
+        if crossing == "East":
+            return cx + rw + curb_offset + index * 4, cy - 92 - index * spacing
+        return cx - rw - curb_offset - index * 4, cy + 92 + index * spacing
+
+    def _get_pedestrian_path(self, crossing):
+        cx, cy, rw = self.CX, self.CY, self.ROAD_W
+        if crossing == "North":
+            return (cx - rw + 10, cy - rw - 20), (cx + rw - 10, cy - rw - 20), "h"
+        if crossing == "South":
+            return (cx + rw - 10, cy + rw + 20), (cx - rw + 10, cy + rw + 20), "h"
+        if crossing == "East":
+            return (cx + rw + 20, cy - rw + 10), (cx + rw + 20, cy + rw - 10), "v"
+        return (cx - rw - 20, cy + rw - 10), (cx - rw - 20, cy - rw + 10), "v"
+
+    def _get_vehicle_stop_position(self, direction, vehicle):
+        cx, cy = self.CX, self.CY
+        lane_id = getattr(vehicle, 'lane', 0)
+        queue_slot = getattr(vehicle, 'queue_slot', 0)
+        lane_offset = 20 if lane_id == 0 else 55
+        my_height = VEHICLE_CONFIGS[getattr(vehicle, 'v_type', 'car')]["height"]
+        stop_line_dist = 115
+        slot_gap = 32
+        stop_offset = stop_line_dist + my_height / 2 + queue_slot * slot_gap
+
+        if direction == "North":
+            return cx + lane_offset, cy - stop_offset, "v"
+        if direction == "South":
+            return cx - lane_offset, cy + stop_offset, "v"
+        if direction == "East":
+            return cx + stop_offset, cy - lane_offset, "h"
+        return cx - stop_offset, cy + lane_offset, "h"
+
+    def _move_animated_pedestrians(self, delta):
+        speed = 70
+
+        remaining_arriving = []
+        for p in self.arriving_pedestrians:
+            p["x"] += p["dx"] * speed * delta
+            p["y"] += p["dy"] * speed * delta
+
+            reached = False
+            if p["orient"] == "v":
+                if (p["dy"] > 0 and p["y"] >= p["target_y"]) or (p["dy"] < 0 and p["y"] <= p["target_y"]):
+                    reached = True
+            else:
+                if (p["dx"] > 0 and p["x"] >= p["target_x"]) or (p["dx"] < 0 and p["x"] <= p["target_x"]):
+                    reached = True
+
+            if reached:
+                self.arriving_pedestrian_ids.discard(p["pedestrian_obj"].pedestrian_id)
+            else:
+                remaining_arriving.append(p)
+        self.arriving_pedestrians = remaining_arriving
+
+        remaining_walking = []
+        for p in self.walking_pedestrians:
+            p["x"] += p["dx"] * speed * delta
+            p["y"] += p["dy"] * speed * delta
+
+            if p["orient"] == "v":
+                done = (p["dy"] > 0 and p["y"] > p["target_y"] + 18) or (p["dy"] < 0 and p["y"] < p["target_y"] - 18)
+            else:
+                done = (p["dx"] > 0 and p["x"] > p["target_x"] + 18) or (p["dx"] < 0 and p["x"] < p["target_x"] - 18)
+
+            if done:
+                if p["id"] in self.ped_anim_objects:
+                    for item in self.ped_anim_objects[p["id"]]:
+                        self.canvas.delete(item)
+                    del self.ped_anim_objects[p["id"]]
+            else:
+                remaining_walking.append(p)
+        self.walking_pedestrians = remaining_walking
 
     def _create_arriving_vehicle(self, direction):
         """Spawns a new vehicle sprite at the map edge."""
@@ -492,10 +662,93 @@ class TrafficGUI:
             
         self.arriving_vehicles.append(v)
 
+    def _create_arriving_pedestrian(self, crossing):
+        queue = self.sim.pedestrian_queues[crossing]
+
+        pedestrian_obj = None
+        for p_obj in reversed(queue):
+            if p_obj.pedestrian_id not in self.arriving_pedestrian_ids:
+                pedestrian_obj = p_obj
+                break
+        if pedestrian_obj is None:
+            return
+
+        if not hasattr(pedestrian_obj, 'color'):
+            pedestrian_obj.color = random.choice(["#f8fafc", "#cbd5e1", "#60a5fa", "#fbbf24", "#f472b6"])
+
+        self.arriving_pedestrian_ids.add(pedestrian_obj.pedestrian_id)
+        wait_x, wait_y = self._get_pedestrian_wait_position(crossing, queue.index(pedestrian_obj))
+        if crossing == "North":
+            start_x, start_y = self.CX, self.CY - self.ROAD_W - 48
+            target_x, target_y, dx, dy, orient = wait_x, wait_y, 1, 0, "h"
+        elif crossing == "South":
+            start_x, start_y = self.CX, self.CY + self.ROAD_W + 48
+            target_x, target_y, dx, dy, orient = wait_x, wait_y, -1, 0, "h"
+        elif crossing == "East":
+            start_x, start_y = self.CANVAS_W + 48, self.CY
+            target_x, target_y, dx, dy, orient = wait_x, wait_y, 0, 1, "v"
+        else:
+            start_x, start_y = -48, self.CY
+            target_x, target_y, dx, dy, orient = wait_x, wait_y, 0, -1, "v"
+
+        self.arriving_pedestrians.append({
+            'id': f"ped_arr_{pedestrian_obj.pedestrian_id}",
+            'pedestrian_obj': pedestrian_obj,
+            'crossing': crossing,
+            'x': start_x,
+            'y': start_y,
+            'dx': dx,
+            'dy': dy,
+            'target_x': target_x,
+            'target_y': target_y,
+            'orient': orient,
+            'color': pedestrian_obj.color,
+        })
+
+    def _create_walking_pedestrian(self, crossing, pedestrian_id):
+        found_arriving = next((p for p in self.arriving_pedestrians if p['pedestrian_obj'].pedestrian_id == pedestrian_id), None)
+        start_pos, target_pos, orient = self._get_pedestrian_path(crossing)
+        if found_arriving:
+            color = found_arriving['color']
+            self.arriving_pedestrians.remove(found_arriving)
+            self.arriving_pedestrian_ids.discard(pedestrian_id)
+            if found_arriving['id'] in self.ped_anim_objects:
+                for item in self.ped_anim_objects[found_arriving['id']]:
+                    self.canvas.delete(item)
+                del self.ped_anim_objects[found_arriving['id']]
+        else:
+            color = random.choice(["#f8fafc", "#cbd5e1", "#60a5fa", "#fbbf24", "#f472b6"])
+
+        start_x, start_y = start_pos
+
+        if crossing == "North":
+            dx, dy = 1, 0
+        elif crossing == "South":
+            dx, dy = -1, 0
+        elif crossing == "East":
+            dx, dy = 0, 1
+        else:
+            dx, dy = 0, -1
+
+        self.walking_pedestrians.append({
+            'id': f"ped_pass_{pedestrian_id}",
+            'crossing': crossing,
+            'x': start_x,
+            'y': start_y,
+            'dx': dx,
+            'dy': dy,
+            'target_x': target_pos[0],
+            'target_y': target_pos[1],
+            'orient': orient,
+            'color': color,
+        })
+
     def _create_passing_vehicle(self, direction, vehicle_id):
         """Converts an 'arriving' sprite into a 'passing' sprite that crosses the intersection."""
         cx, cy, rw = self.CX, self.CY, self.ROAD_W
         start_x, start_y, v_type, lane_id, v_color = 0, 0, "car", 0, random.choice(VEHICLE_PALETTE)
+        existing_sprite_items = None
+        pass_id = f"pass_{vehicle_id}"
         
         # Match by vehicle_id for accurate sprite transition
         found_arriving = next(
@@ -507,10 +760,7 @@ class TrafficGUI:
             v_color = found_arriving['color']
             self.arriving_vehicles.remove(found_arriving)
             self.arriving_vehicle_ids.discard(vehicle_id)
-            if found_arriving['id'] in self.anim_objects:
-                for item in self.anim_objects[found_arriving['id']]:
-                    self.canvas.delete(item)
-                del self.anim_objects[found_arriving['id']]
+            existing_sprite_items = self.anim_objects.pop(found_arriving['id'], None)
         else:
             # No arriving sprite — vehicle was either a static queued sprite
             # or was never visible. Look up the departed vehicle's attributes.
@@ -523,27 +773,18 @@ class TrafficGUI:
                 lane_id = getattr(departed_v, 'lane', 0)
                 v_type = getattr(departed_v, 'v_type', 'car')
                 v_color = getattr(departed_v, 'color', random.choice(VEHICLE_PALETTE))
-                
-                l1, l2 = 20, 55
-                off = l1 if lane_id == 0 else l2
-                stop_dist = 115  # Match the stop_line_dist from _get_stop_distance
-                if direction == "North": start_x, start_y = cx + off, cy - stop_dist
-                elif direction == "South": start_x, start_y = cx - off, cy + stop_dist
-                elif direction == "East": start_x, start_y = cx + stop_dist, cy - off
-                elif direction == "West": start_x, start_y = cx - stop_dist, cy + off
+
+                start_x, start_y, _ = self._get_vehicle_stop_position(direction, departed_v)
                 
                 # Clean up the old queued sprite if it exists
                 old_q_id = f"q_{direction}_{vehicle_id}"
-                if old_q_id in self.anim_objects:
-                    for item in self.anim_objects[old_q_id]:
-                        self.canvas.delete(item)
-                    del self.anim_objects[old_q_id]
+                existing_sprite_items = self.anim_objects.pop(old_q_id, None)
             else:
                 # Vehicle was truly never visible — skip entirely
                 return
 
         v = {
-            'id': f"pass_{vehicle_id}", 'dir': direction, 'type': v_type,
+            'id': pass_id, 'dir': direction, 'type': v_type,
             'color': v_color, 'x': start_x, 'y': start_y,
             'dx': 0, 'dy': 0, 'orient': 'v', 'lane': lane_id
         }
@@ -552,8 +793,38 @@ class TrafficGUI:
         elif direction == "South": v['dy'], v['orient'] = -1, 'v'
         elif direction == "East": v['dx'], v['orient'] = -1, 'h'
         elif direction == "West": v['dx'], v['orient'] = 1, 'h'
+
+        if existing_sprite_items is not None:
+            self.anim_objects[pass_id] = existing_sprite_items
             
         self.passing_vehicles.append(v)
+
+    def _update_or_create_pedestrian(self, vid, x, y, orient, color, moving=False):
+        body_color = color if moving else COLORS["CURB"]
+        head_color = color
+        if vid not in self.ped_anim_objects:
+            head = self.canvas.create_oval(x-4, y-9, x+4, y-1, fill=head_color, outline="#0f172a", width=1)
+            torso = self.canvas.create_line(x, y-1, x, y+8, fill=body_color, width=2)
+            arm = self.canvas.create_line(x-4, y+2, x+4, y+2, fill=body_color, width=2)
+            leg1 = self.canvas.create_line(x, y+8, x-4, y+14, fill=body_color, width=2)
+            leg2 = self.canvas.create_line(x, y+8, x+4, y+14, fill=body_color, width=2)
+            self.ped_anim_objects[vid] = [head, torso, arm, leg1, leg2]
+            for item in self.ped_anim_objects[vid]:
+                self.canvas.tag_raise(item)
+        else:
+            items = self.ped_anim_objects[vid]
+            self.canvas.coords(items[0], x-4, y-9, x+4, y-1)
+            self.canvas.coords(items[1], x, y-1, x, y+8)
+            self.canvas.coords(items[2], x-4, y+2, x+4, y+2)
+            self.canvas.coords(items[3], x, y+8, x-4, y+14)
+            self.canvas.coords(items[4], x, y+8, x+4, y+14)
+            self.canvas.itemconfig(items[0], fill=head_color)
+            self.canvas.itemconfig(items[1], fill=body_color)
+            self.canvas.itemconfig(items[2], fill=body_color)
+            self.canvas.itemconfig(items[3], fill=body_color)
+            self.canvas.itemconfig(items[4], fill=body_color)
+            for item in items:
+                self.canvas.tag_raise(item)
 
     def _sync_canvas(self):
         """High-level redraw: maps logical state to visual canvas objects."""
@@ -569,6 +840,17 @@ class TrafficGUI:
                 for b_id in self.lights[d][state]:
                     self.canvas.itemconfig(b_id, fill=COLORS[state], outline="#fff", width=2)
                     self.canvas.tag_raise(b_id)
+
+        ped_state = self.sim.pedestrian_light.state
+        for signal in self.pedestrian_signal:
+            for item_id in signal["DONT_WALK"] + signal["WALK"]:
+                self.canvas.itemconfig(item_id, fill=COLORS["OFF"], outline="#334155", width=1)
+            if ped_state == "WALK":
+                self.canvas.itemconfig(signal["WALK"][0], fill=COLORS["WALK"], outline="#fff", width=2)
+                self.canvas.itemconfig(signal["label"], text="WALK")
+            else:
+                self.canvas.itemconfig(signal["DONT_WALK"][0], fill=COLORS["DONT_WALK"], outline="#fff", width=2)
+                self.canvas.itemconfig(signal["label"], text="DON'T WALK")
         
         cx, cy, lane_offset = self.CX, self.CY, self.ROAD_W // 2
         
@@ -590,19 +872,27 @@ class TrafficGUI:
                     
                 v_id = f"q_{d}_{vobj.vehicle_id}"
                 active_ids.add(v_id)
-                dist = self._get_stop_distance(d, i)
-                
-                # Use permanent lane from vehicle object
-                lane_id = getattr(vobj, 'lane', 0)
-                l1, l2 = 20, 55
-                off = l1 if lane_id == 0 else l2
-                
-                if d == "North": x, y, orient = cx + off, cy - dist, "v"
-                elif d == "South": x, y, orient = cx - off, cy + dist, "v"
-                elif d == "East": x, y, orient = cx + dist, cy - off, "h"
-                else: x, y, orient = cx - dist, cy + off, "h"
+                x, y, orient = self._get_vehicle_stop_position(d, vobj)
                 
                 self._update_or_create_car(v_id, x, y, orient, vobj.color, vobj.v_type)
+
+        # Render static queued pedestrians
+        for d in DIRECTIONS:
+            queue = self.sim.pedestrian_queues[d]
+            for i in range(len(queue)):
+                if i >= 14:
+                    break
+                pobj = queue[i]
+                if pobj.pedestrian_id in self.arriving_pedestrian_ids:
+                    continue
+
+                if not hasattr(pobj, 'color'):
+                    pobj.color = random.choice(["#f8fafc", "#cbd5e1", "#60a5fa", "#fbbf24", "#f472b6"])
+
+                p_id = f"p_{d}_{pobj.pedestrian_id}"
+                active_ids.add(p_id)
+                x, y = self._get_pedestrian_wait_position(d, i)
+                self._update_or_create_pedestrian(p_id, x, y, "v" if d in ("North", "South") else "h", pobj.color, moving=False)
 
         # Render moving vehicles
         for v_list in [self.passing_vehicles, self.arriving_vehicles]:
@@ -610,12 +900,24 @@ class TrafficGUI:
                 active_ids.add(v['id'])
                 self._update_or_create_car(v['id'], v['x'], v['y'], v['orient'], v['color'], v['type'])
 
+        # Render moving pedestrians
+        for p in [self.arriving_pedestrians, self.walking_pedestrians]:
+            for ped in p:
+                active_ids.add(ped['id'])
+                self._update_or_create_pedestrian(ped['id'], ped['x'], ped['y'], ped['orient'], ped['color'], moving=True)
+
         # Garbage collect sprites for vehicles that left the map
         for vid in list(self.anim_objects.keys()):
             if vid not in active_ids:
                 for item in self.anim_objects[vid]:
                     self.canvas.delete(item)
                 del self.anim_objects[vid]
+
+        for vid in list(self.ped_anim_objects.keys()):
+            if vid not in active_ids:
+                for item in self.ped_anim_objects[vid]:
+                    self.canvas.delete(item)
+                del self.ped_anim_objects[vid]
 
     def _update_or_create_car(self, vid, x, y, orient, color, v_type="car"):
         """Draws/moves a vehicle sprite including details like headlights and windshields."""

@@ -12,6 +12,7 @@ A **high-fidelity discrete-event simulation** of a 4-way, multi-lane traffic int
 - **Parallel Throughput**: Models a 2-lane road per direction where multiple vehicles discharge simultaneously.
 - **Realistic Driver Behavior**: Includes randomized reaction delays (0.1–0.6s) and headway jitter to mimic real-world traffic flow.
 - **Dynamic Visuals**: Animated Tkinter GUI with assorted vehicle types (cars, vans, trucks), random color palettes, and smooth state transitions.
+- **Pedestrian Crossing Phase**: Adds pedestrian queues, zebra crossings, and dedicated WALK / DON'T WALK signals that alternate with vehicle phases.
 - **Data-Driven**: Automatic generation of wait-time distributions, queue analysis, and throughput metrics.
 
 ### Scenarios
@@ -21,6 +22,8 @@ A **high-fidelity discrete-event simulation** of a 4-way, multi-lane traffic int
 | Normal | 10 veh/min | 30 s |
 | Rush Hour | 20 veh/min | 45 s |
 | Optimized | 20 veh/min | 60 s |
+
+Pedestrian walk duration is configured per scenario in `src/config.py`.
 
 ---
 
@@ -85,6 +88,9 @@ After running `python src/main.py`:
 - `normal_results.csv`
 - `rush_hour_results.csv`
 - `summary.csv` — cross-scenario comparison
+- `low_traffic_pedestrians.csv` — pedestrian agent data
+- `normal_pedestrians.csv`
+- `rush_hour_pedestrians.csv`
 
 **Charts (`/charts/`):**
 - `avg_wait_time.png` — average wait time comparison

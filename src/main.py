@@ -11,7 +11,7 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from simulation import TrafficSimulation
-from data_collector import save_vehicle_data, save_summary, print_summary_table
+from data_collector import save_vehicle_data, save_pedestrian_data, save_summary, print_summary_table
 import charts as chart_module
 
 SCENARIO_NAMES = ["low_traffic", "normal", "rush_hour"]
@@ -36,6 +36,7 @@ def run_all_scenarios():
         all_results.append(results)
 
         save_vehicle_data(results, output_dir=DATA_DIR)
+        save_pedestrian_data(results, output_dir=DATA_DIR)
 
     print()
     save_summary(all_results, output_dir=DATA_DIR)

@@ -7,6 +7,7 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from vehicle import Vehicle
+from pedestrian import Pedestrian
 from traffic_light import TrafficLight
 from config import SCENARIOS, DIRECTIONS, PHASES
 
@@ -30,26 +31,93 @@ class TrafficSimulation:
 
         # Each scenario run should start with vehicle ID 1
         Vehicle.reset_counter()
+        Pedestrian.reset_counter()
 
         # Initialize hardware: 4 lights and 4 FIFO queues
         self.lights = {
             d: TrafficLight(self.env, d, self.config)
             for d in DIRECTIONS
         }
+        self.pedestrian_light = TrafficLight(
+            self.env,
+            "Pedestrians",
+            self.config,
+            valid_states=("DONT_WALK", "WALK"),
+            default_state="DONT_WALK"
+        )
         self.queues = {d: [] for d in DIRECTIONS}
+        self.pedestrian_queues = {d: [] for d in DIRECTIONS}
         self.lane_counters = {d: 0 for d in DIRECTIONS}  # For alternating lane assignment
 
         self.departed_vehicles = []
+        self.departed_pedestrians = []
         self.stats = {
             "total_arrived": 0,
             "total_departed": 0,
             "arrivals_per_dir": {d: 0 for d in DIRECTIONS},
-            "max_queue": {d: 0 for d in DIRECTIONS}
+            "max_queue": {d: 0 for d in DIRECTIONS},
+            "pedestrian_total_arrived": 0,
+            "pedestrian_total_departed": 0,
+            "pedestrian_arrivals_per_crossing": {d: 0 for d in DIRECTIONS},
+            "pedestrian_max_queue": {d: 0 for d in DIRECTIONS},
         }
 
         # Data for time-series charts (sampled periodically)
         self.queue_history = {d: [] for d in DIRECTIONS}
         self.queue_time_points = []
+        self.pedestrian_queue_history = {d: [] for d in DIRECTIONS}
+
+    def pedestrian_arrival(self, crossing):
+        """
+        Generates pedestrian arrivals as independent Poisson processes per crossing.
+        Each pedestrian joins a curbside queue and waits for a WALK phase.
+        """
+        rate = self.config.get("pedestrian_arrival_rate", 4 / 60)
+
+        while True:
+            inter_arrival = np.random.exponential(1.0 / rate)
+            yield self.env.timeout(inter_arrival)
+
+            pedestrian = Pedestrian(crossing, self.env.now)
+            self.pedestrian_queues[crossing].append(pedestrian)
+
+            self.stats["pedestrian_total_arrived"] += 1
+            self.stats["pedestrian_arrivals_per_crossing"][crossing] += 1
+
+            q_len = len(self.pedestrian_queues[crossing])
+            if q_len > self.stats["pedestrian_max_queue"][crossing]:
+                self.stats["pedestrian_max_queue"][crossing] = q_len
+
+    def pedestrian_departure_lane(self, crossing):
+        """
+        Serves one pedestrian queue whenever the WALK signal is active.
+        Pedestrians leave in a realistic staggered stream rather than all at once.
+        """
+        walk_interval = self.config.get("pedestrian_crossing_interval", 1.2)
+        was_walk = False
+
+        while True:
+            yield self.env.timeout(0.1)
+
+            if self.pedestrian_light.state == "WALK" and self.pedestrian_queues[crossing]:
+                if not was_walk:
+                    was_walk = True
+                    reaction = np.random.uniform(0.2, 0.8)
+                    yield self.env.timeout(reaction)
+                    if self.pedestrian_light.state != "WALK" or not self.pedestrian_queues[crossing]:
+                        continue
+
+                pedestrian = self.pedestrian_queues[crossing].pop(0)
+                pedestrian.depart(self.env.now)
+                self.departed_pedestrians.append(pedestrian)
+                self.stats["pedestrian_total_departed"] += 1
+
+                jitter = np.random.uniform(-0.25, 0.35)
+                crossing_delay = max(0.6, walk_interval + jitter)
+                yield self.env.timeout(crossing_delay)
+            else:
+                if self.pedestrian_light.state != "WALK":
+                    was_walk = False
 
     def traffic_light_controller(self):
         """
@@ -58,9 +126,11 @@ class TrafficSimulation:
         """
         green = self.config["green_duration"]
         yellow = self.config["yellow_duration"]
+        pedestrian_walk = self.config.get("pedestrian_walk_duration", 20)
 
         while True:
             # North-South green light phase
+            self.pedestrian_light.set_state("DONT_WALK")
             for d in PHASES["phase_A"]:
                 self.lights[d].set_state("GREEN")
             for d in PHASES["phase_B"]:
@@ -72,6 +142,13 @@ class TrafficSimulation:
             for d in PHASES["phase_A"]:
                 self.lights[d].set_state("YELLOW")
             yield self.env.timeout(yellow)
+
+            # All-red pedestrian crossing phase
+            for d in DIRECTIONS:
+                self.lights[d].set_state("RED")
+            self.pedestrian_light.set_state("WALK")
+            yield self.env.timeout(pedestrian_walk)
+            self.pedestrian_light.set_state("DONT_WALK")
 
             # East-West green light phase
             for d in PHASES["phase_B"]:
@@ -85,6 +162,13 @@ class TrafficSimulation:
             for d in PHASES["phase_B"]:
                 self.lights[d].set_state("YELLOW")
             yield self.env.timeout(yellow)
+
+            # All-red pedestrian crossing phase
+            for d in DIRECTIONS:
+                self.lights[d].set_state("RED")
+            self.pedestrian_light.set_state("WALK")
+            yield self.env.timeout(pedestrian_walk)
+            self.pedestrian_light.set_state("DONT_WALK")
 
     def vehicle_arrival(self, direction):
         """
@@ -101,6 +185,10 @@ class TrafficSimulation:
             vehicle = Vehicle(direction, self.env.now)
             vehicle.lane = self.lane_counters[direction] % 2
             self.lane_counters[direction] += 1
+            vehicle.queue_slot = sum(
+                1 for queued in self.queues[direction]
+                if getattr(queued, 'lane', 0) == vehicle.lane
+            )
             self.queues[direction].append(vehicle)
             
             self.stats["total_arrived"] += 1
@@ -159,6 +247,7 @@ class TrafficSimulation:
             self.queue_time_points.append(round(self.env.now))
             for d in DIRECTIONS:
                 self.queue_history[d].append(len(self.queues[d]))
+                self.pedestrian_queue_history[d].append(len(self.pedestrian_queues[d]))
             yield self.env.timeout(60)
 
     def start(self):
@@ -170,6 +259,8 @@ class TrafficSimulation:
             # Two independent lane processes per direction for true parallel flow
             self.env.process(self.vehicle_departure_lane(direction, 0))
             self.env.process(self.vehicle_departure_lane(direction, 1))
+            self.env.process(self.pedestrian_arrival(direction))
+            self.env.process(self.pedestrian_departure_lane(direction))
         self._started = True
 
     def step(self, delta=1.0):
@@ -204,6 +295,10 @@ class TrafficSimulation:
             v.wait_time for v in self.departed_vehicles
             if v.wait_time is not None
         ]
+        pedestrian_wait_times = [
+            p.wait_time for p in self.departed_pedestrians
+            if p.wait_time is not None
+        ]
 
         throughput_ratio = (
             round(self.stats["total_departed"] / self.stats["total_arrived"], 4)
@@ -222,10 +317,17 @@ class TrafficSimulation:
             "min_wait_time": float(np.min(wait_times)) if wait_times else 0.0,
             "std_wait_time": float(np.std(wait_times)) if wait_times else 0.0,
             "max_queue_per_lane": dict(self.stats["max_queue"]),
+            "pedestrian_total_arrived": self.stats["pedestrian_total_arrived"],
+            "pedestrian_total_departed": self.stats["pedestrian_total_departed"],
+            "pedestrian_avg_wait_time": float(np.mean(pedestrian_wait_times)) if pedestrian_wait_times else 0.0,
+            "pedestrian_max_queue_per_crossing": dict(self.stats["pedestrian_max_queue"]),
             "queue_history": dict(self.queue_history),
+            "pedestrian_queue_history": dict(self.pedestrian_queue_history),
             "queue_time_points": list(self.queue_time_points),
             "vehicles": self.departed_vehicles,
+            "pedestrians": self.departed_pedestrians,
             "light_state_log": {
                 d: self.lights[d].state_log for d in DIRECTIONS
-            }
+            },
+            "pedestrian_light_state_log": list(self.pedestrian_light.state_log)
         }

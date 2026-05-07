@@ -25,6 +25,30 @@ def save_vehicle_data(results, output_dir="data"):
     print(f"  Vehicle data saved → {filepath}  ({len(df)} records)")
     return df
 
+def save_pedestrian_data(results, output_dir="data"):
+    """
+    Exports individual pedestrian metrics (arrival, departure, wait times) to a CSV file.
+    Returns the generated DataFrame.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    scenario = results["scenario"]
+
+    rows = []
+    for p in results.get("pedestrians", []):
+        rows.append({
+            "pedestrian_id":  p.pedestrian_id,
+            "crossing":       p.crossing,
+            "arrival_time":   round(p.arrival_time, 2),
+            "departure_time": round(p.departure_time, 2),
+            "wait_time":      round(p.wait_time, 2)
+        })
+
+    df = pd.DataFrame(rows)
+    filepath = os.path.join(output_dir, f"{scenario}_pedestrians.csv")
+    df.to_csv(filepath, index=False)
+    print(f"  Pedestrian data saved → {filepath}  ({len(df)} records)")
+    return df
+
 def save_summary(all_results, output_dir="data"):
     """
     Creates a master summary report comparing key performance indicators across all scenarios.
@@ -42,6 +66,9 @@ def save_summary(all_results, output_dir="data"):
             "max_wait_time_sec": round(r["max_wait_time"], 2),
             "min_wait_time_sec": round(r["min_wait_time"], 2),
             "std_wait_time_sec": round(r["std_wait_time"], 2),
+            "pedestrian_arrived": r.get("pedestrian_total_arrived", 0),
+            "pedestrian_departed": r.get("pedestrian_total_departed", 0),
+            "pedestrian_avg_wait_sec": round(r.get("pedestrian_avg_wait_time", 0.0), 2),
             "max_queue_north":   max_q["North"],
             "max_queue_south":   max_q["South"],
             "max_queue_east":    max_q["East"],
