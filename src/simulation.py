@@ -116,24 +116,17 @@ class TrafficSimulation:
         Handles vehicles exiting from a single lane of the intersection.
         Two of these processes run in parallel per direction (one per lane),
         modeling a real 2-lane road where multiple cars pass simultaneously.
-        Each lane has slightly randomized timing to mimic real driver behavior.
         """
-        base_interval = self.config["departure_interval"]
         was_green = False
 
         while True:
-            # Small polling delay to simulate continuous checking
-            yield self.env.timeout(0.1)
+            # Small polling delay for responsive checking
+            yield self.env.timeout(0.05)
 
             if self.lights[direction].is_green() and self.queues[direction]:
-                # Random reaction delay when the light FIRST turns green
+                # No reaction delay - vehicles immediately flow to create continuous movement
                 if not was_green:
                     was_green = True
-                    reaction = np.random.uniform(0.1, 0.6)
-                    yield self.env.timeout(reaction)
-                    # Re-check after waiting — light may have changed
-                    if not self.lights[direction].is_green() or not self.queues[direction]:
-                        continue
 
                 # Pop the first vehicle from the shared queue (FIFO)
                 vehicle = self.queues[direction].pop(0)
@@ -142,12 +135,11 @@ class TrafficSimulation:
                 self.departed_vehicles.append(vehicle)
                 self.stats["total_departed"] += 1
                 
-                # Randomized headway: base ± jitter (models different driver speeds)
-                jitter = np.random.uniform(-0.3, 0.4)
-                headway = max(0.4, base_interval + jitter)
-                yield self.env.timeout(headway)
+                # Very short headway (0.3s) matches the visual movement speed (120px/s)
+                # This prevents following cars from stopping at the line waiting to be popped
+                yield self.env.timeout(0.3)
             else:
-                # Reset so we get a fresh reaction delay next green phase
+                # Reset state if light is no longer green
                 if not self.lights[direction].is_green():
                     was_green = False
 
