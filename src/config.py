@@ -9,7 +9,7 @@ SCENARIOS = {
         "departure_interval": 1.0,
         "simulation_time": 3600,
         "label": "Low Traffic",
-        "description": "Early morning (~5-6 AM) — 5 vehicles/min/lane"
+        "description": "Late night (~1-2 AM) — 5 vehicles/min/lane"
     },
     "normal": {
         "arrival_rate": 10 / 60,
@@ -18,7 +18,7 @@ SCENARIOS = {
         "departure_interval": 1.0,
         "simulation_time": 3600,
         "label": "Normal",
-        "description": "Mid-morning (~9-10 AM) — 10 vehicles/min/lane"
+        "description": "Night (~9-10 PM) — 10 vehicles/min/lane"
     },
     "rush_hour": {
         "arrival_rate": 20 / 60,
@@ -27,7 +27,7 @@ SCENARIOS = {
         "departure_interval": 1.0,
         "simulation_time": 3600,
         "label": "Rush Hour",
-        "description": "Peak hours (~7-8 AM or 5-6 PM) — 20 vehicles/min/lane"
+        "description": "Weekend night rush (~11 PM-1 AM) — 20 vehicles/min/lane"
     },
     "optimized": {
         "arrival_rate": 20 / 60,
@@ -36,7 +36,7 @@ SCENARIOS = {
         "departure_interval": 1.0,
         "simulation_time": 3600,
         "label": "Optimized",
-        "description": "Rush hour with optimized timing — green_duration=60s"
+        "description": "Night rush with optimized signal timing — green=60s"
     }
 }
 

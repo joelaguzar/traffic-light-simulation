@@ -11,6 +11,12 @@ import sys
 import os
 import random
 
+try:
+    from PIL import Image, ImageTk
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+
 # Ensure we can import modules from the current directory
 sys.path.insert(0, os.path.dirname(__file__))
 from simulation import TrafficSimulation
@@ -20,16 +26,16 @@ COLORS = {
     "bg": "#0f172a",
     "panel": "#1e293b",
     "accent": "#38bdf8",
-    "road": "#334155",
+    "road": "#6b7280",
     "road_line": "#94a3b8",
-    "grass": "#064e3b",
+    "grass": "#5a9e4a",
     "text": "#f8fafc",
     "text_dim": "#94a3b8",
     "GREEN": "#10b981",
     "RED": "#ef4444",
     "YELLOW": "#f59e0b",
     "OFF": "#1e293b",
-    "SIDEWALK": "#475569",
+    "SIDEWALK": "#c8b89a",
     "MARKING": "#ffffff",
 }
 
@@ -49,20 +55,29 @@ VEHICLE_PALETTE = [
     "#818cf8", "#fb7185", "#a3e635", "#22d3ee",
 ]
 
-# Physical dimensions for different vehicle types in pixels
+# Physical dimensions for different vehicle types in pixels.
+# Width = across the lane (~40px lane, so ~26-28px leaves good margins).
+# Height = along the lane (maintained near the original 2:1 image aspect ratio).
 VEHICLE_CONFIGS = {
-    "car":   {"width": 14, "height": 22},
-    "van":   {"width": 15, "height": 26},
-    "truck": {"width": 16, "height": 32}
+    "car":      {"width": 20, "height": 41},  # 895×436 PNG → 2.05:1
+    "van":      {"width": 20, "height": 53},  # kalesa 769×292 → 2.63:1
+    "truck":    {"width": 20, "height": 40},  # 527×262 → 2.01:1
+    "jeep":     {"width": 20, "height": 43},  # 780×361 → 2.16:1
+    "bus":      {"width": 20, "height": 47},  # 1042×446 → 2.34:1
+    "tricycle": {"width": 20, "height": 24},  # 450×377 → 1.19:1
 }
 
 class TrafficGUI:
     CANVAS_W = 600
     CANVAS_H = 600
-    CX = 300
-    CY = 300
-    ROAD_W = 80  # Half-width of the total road area (spanning 2 lanes)
-    LANE_W = 35 
+    CX = 300        # intersection centre x  (658/1312 × 600 ≈ 0.5015 × W)
+    CY = 327        # intersection centre y  (654/1199 × 600 ≈ 0.5455 × H)
+    ROAD_W = 41     # half-width of road
+    LANE_W = 20
+    LANE_1 = 14     # inner lane offset — 4 px margin from road centre line
+    LANE_2 = 42     # outer lane offset — keeps 8 px side gap at width=20
+    STOP_NS = 125   # 0.1952 × 600 + 10 px clearance (measured to crosswalk far edge)
+    STOP_EW = 120   # 0.1761 × 600 + 10 px clearance (full crosswalk depth accounted)
 
     def __init__(self, root, scenario_name="normal"):
         self.root = root
@@ -76,7 +91,10 @@ class TrafficGUI:
         self.sim_delta_per_step = 0.16 
         
         self._setup_window()
+        self._load_assets()
         self._build_layout()
+        self.root.update_idletasks()
+        self._rescale_to_canvas()
         self._draw_static_elements()
         self._draw_traffic_lights()
         
@@ -91,6 +109,140 @@ class TrafficGUI:
         
         self._schedule_update()
 
+    # PIL rotation angles so the car front faces the direction of travel.
+    # Source PNGs have the car front pointing RIGHT (landscape orientation).
+    # PIL rotates counterclockwise: 90° CCW turns right-facing → up-facing (South).
+    _DIR_ROTATIONS = {"North": 270, "South": 90, "East": 180, "West": 0}
+
+    # Fallback candidates per vehicle type, tried in order.
+    _ASSET_CANDIDATES = {
+        "car":      ["car.png", "redcar.png"],
+        "van":      ["van.png", "kalesa.png", "redcar.png", "car.png"],
+        "truck":    ["truck.png", "redcar.png", "car.png"],
+        "jeep":     ["jeep.png", "redcar.png", "car.png"],
+        "bus":      ["bus.png", "truck.png"],
+        "tricycle": ["trycicle.png", "tricycle.png", "redcar.png", "car.png"],
+    }
+
+    def _load_assets(self):
+        """Load per-type PNG sprites from the assets/ folder and pre-rotate for each direction."""
+        self.vehicle_images = {}
+        if not HAS_PIL:
+            return
+
+        assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
+        if not os.path.isdir(assets_dir):
+            return
+
+        for v_type, cfg in VEHICLE_CONFIGS.items():
+            img_path = None
+            for candidate in self._ASSET_CANDIDATES.get(v_type, [f"{v_type}.png"]):
+                p = os.path.join(assets_dir, candidate)
+                if os.path.exists(p):
+                    img_path = p
+                    break
+            if not img_path:
+                continue
+
+            try:
+                base = Image.open(img_path).convert("RGBA")
+                self.vehicle_images[v_type] = {}
+                for direction, angle in self._DIR_ROTATIONS.items():
+                    rotated = base.rotate(angle, expand=True)
+                    if direction in ("North", "South"):
+                        size = (cfg["width"], cfg["height"])
+                    else:
+                        size = (cfg["height"], cfg["width"])
+                    resized = rotated.resize(size, Image.LANCZOS)
+                    self.vehicle_images[v_type][direction] = ImageTk.PhotoImage(resized)
+            except Exception:
+                pass
+
+        # Progress bar frame PNG
+        self.progressbar_img = None
+        bar_path = os.path.join(assets_dir, "progressionbar.png")
+        if HAS_PIL and os.path.exists(bar_path):
+            try:
+                bar = Image.open(bar_path).convert("RGBA")
+                bar = bar.resize((240, 40), Image.LANCZOS)
+                self.progressbar_img = ImageTk.PhotoImage(bar)
+            except Exception:
+                pass
+
+        # Start / Pause button images
+        self.img_pause = None
+        self.img_start = None
+        for attr, fname in [("img_pause", "Pause.png"), ("img_start", "Start.png")]:
+            p = os.path.join(assets_dir, fname)
+            if HAS_PIL and os.path.exists(p):
+                try:
+                    im = Image.open(p).convert("RGBA")
+                    im = im.resize((240, 41), Image.LANCZOS)
+                    setattr(self, attr, ImageTk.PhotoImage(im))
+                except Exception:
+                    pass
+
+        # Speed bar frame + button
+        self.speed_bar_img = None
+        self.speed_btn_img = None
+        spd_path = os.path.join(assets_dir, "speed.png")
+        btn_path = os.path.join(assets_dir, "speed_button.png")
+        if HAS_PIL and os.path.exists(spd_path):
+            try:
+                sb = Image.open(spd_path).convert("RGBA")
+                sb = sb.resize((240, 34), Image.LANCZOS)
+                self.speed_bar_img = ImageTk.PhotoImage(sb)
+            except Exception:
+                pass
+        if HAS_PIL and os.path.exists(btn_path):
+            try:
+                bb = Image.open(btn_path).convert("RGBA")
+                bb = bb.resize((30, 30), Image.LANCZOS)
+                self.speed_btn_img = ImageTk.PhotoImage(bb)
+            except Exception:
+                pass
+
+        # Map background
+        self.layout_img = None
+        layout_path = os.path.join(assets_dir, "layout-night.png")
+        if HAS_PIL and os.path.exists(layout_path):
+            try:
+                bg = Image.open(layout_path).convert("RGB")
+                bg = bg.resize((self.CANVAS_W, self.CANVAS_H), Image.LANCZOS)
+                self.layout_img = ImageTk.PhotoImage(bg)
+            except Exception:
+                pass
+
+    def _rescale_to_canvas(self):
+        """Measure the actual canvas size and rescale all road geometry to fit."""
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        if w < 50 or h < 50:
+            return  # not laid out yet, keep defaults
+        self.CANVAS_W = w
+        self.CANVAS_H = h
+        sx = w / 600
+        sy = h / 600
+        s = min(sx, sy)
+        self.CX     = int(round(0.5015 * w))   # 658/1312 image ratio
+        self.CY     = int(round(0.5455 * h))   # 654/1199 image ratio (crosswalk midpoint)
+        self.ROAD_W = int(round(41 / 600 * s * 600))
+        self.LANE_1 = int(round(14 / 600 * s * 600))
+        self.LANE_2 = int(round(42 / 600 * s * 600))
+        self.STOP_NS = int(round(0.1952 * h)) + 10  # far edge of N/S crosswalk + clearance
+        self.STOP_EW = int(round(0.1761 * w)) + 10  # far edge of E/W crosswalk + clearance
+        # Reload background image at exact canvas size
+        if HAS_PIL:
+            assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
+            layout_path = os.path.join(assets_dir, "layout-night.png")
+            if os.path.exists(layout_path):
+                try:
+                    bg = Image.open(layout_path).convert("RGB")
+                    bg = bg.resize((w, h), Image.LANCZOS)
+                    self.layout_img = ImageTk.PhotoImage(bg)
+                except Exception:
+                    pass
+
     def _setup_window(self):
         scenario_label = self.sim.config.get("label", self.scenario_name)
         self.root.title(f"Traffic Simulation - {scenario_label}")
@@ -98,15 +250,17 @@ class TrafficGUI:
         self.root.geometry("1000x700")
         self.root.resizable(False, False)
         
-        # Load custom fonts with fallback to system defaults
-        try:
-            self.font_title = ("Segoe UI", 16, "bold")
-            self.font_stat = ("Consolas", 11)
-            self.font_label = ("Segoe UI", 10, "bold")
-        except:
-            self.font_title = ("Helvetica", 16, "bold")
-            self.font_stat = ("Courier", 11)
-            self.font_label = ("Helvetica", 10, "bold")
+        # Pick the best available pixel/monospace font
+        import tkinter.font as tkFont
+        available = tkFont.families()
+        pixel_candidates = [
+            "Press Start 2P", "VT323", "Silkscreen",
+            "Fixedsys", "Minecraft", "Courier New", "Courier",
+        ]
+        pf = next((f for f in pixel_candidates if f in available), "Courier")
+        self.font_title = (pf, 18, "bold")
+        self.font_stat  = (pf, 8)
+        self.font_label = (pf, 8, "bold")
 
     def _build_layout(self):
         # Header and info bar
@@ -133,8 +287,19 @@ class TrafficGUI:
         tk.Label(progress_frame, text="TOTAL PROGRESS", fg=COLORS["accent"], 
                  bg=COLORS["bg"], font=self.font_label).pack(anchor="e")
         
-        self.progress = ttk.Progressbar(progress_frame, mode="determinate", length=200)
-        self.progress.pack(pady=2)
+        if self.progressbar_img:
+            self.progress_canvas = tk.Canvas(
+                progress_frame, width=240, height=40,
+                bg=COLORS["bg"], highlightthickness=0
+            )
+            self.progress_canvas.pack(pady=2)
+            self._bar_frame_id = self.progress_canvas.create_image(
+                0, 0, image=self.progressbar_img, anchor=tk.NW
+            )
+        else:
+            self.progress_canvas = None
+            self.progress = ttk.Progressbar(progress_frame, mode="determinate", length=200)
+            self.progress.pack(pady=2)
         
         self.lbl_progress = tk.Label(progress_frame, text="0%", fg=COLORS["text_dim"], 
                                      bg=COLORS["bg"], font=self.font_stat)
@@ -149,13 +314,13 @@ class TrafficGUI:
         self.canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         self.canvas = tk.Canvas(
-            self.canvas_frame, width=self.CANVAS_W, height=self.CANVAS_H,
+            self.canvas_frame,
             bg=COLORS["bg"], highlightthickness=0
         )
-        self.canvas.pack(padx=10, pady=10)
+        self.canvas.pack(fill=tk.BOTH, expand=True)
 
         # Interaction Sidebar
-        self.panel = tk.Frame(main_frame, bg=COLORS["panel"], width=320, padx=20, pady=20)
+        self.panel = tk.Frame(main_frame, bg=COLORS["panel"], width=320, padx=20, pady=20, bd=2, relief=tk.RIDGE)
         self.panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(15, 0))
         self.panel.pack_propagate(False)
 
@@ -174,29 +339,42 @@ class TrafficGUI:
             self.lane_stats[d] = self._create_stat_row(f"{icon} {d} Lane", "RED | 0 cars", color=VEHICLE_COLORS[d])
 
         self._create_panel_section("SIMULATION CONTROLS")
-        self.btn_pause = tk.Button(
-            self.panel, text="⏸ PAUSE", command=self._toggle_pause,
-            bg=COLORS["accent"], fg=COLORS["bg"], font=self.font_label,
-            relief=tk.FLAT, bd=0, pady=8, cursor="hand2",
-            activebackground=COLORS["text"], activeforeground=COLORS["bg"]
-        )
-        self.btn_pause.pack(fill=tk.X, pady=5)
+        if self.img_pause:
+            self.btn_pause = tk.Label(
+                self.panel, image=self.img_pause,
+                bg=COLORS["panel"], cursor="hand2"
+            )
+            self.btn_pause.bind("<Button-1>", lambda e: self._toggle_pause())
+        else:
+            self.btn_pause = tk.Button(
+                self.panel, text="⏸ PAUSE", command=self._toggle_pause,
+                bg=COLORS["accent"], fg=COLORS["bg"], font=self.font_label,
+                relief=tk.FLAT, bd=0, pady=8, cursor="hand2"
+            )
+        self.btn_pause.pack(pady=5)
         
         # Playback speed control
         speed_container = tk.Frame(self.panel, bg=COLORS["panel"])
         speed_container.pack(fill=tk.X, pady=(0, 10))
-        tk.Label(speed_container, text="Simulation Speed", fg=COLORS["text_dim"], 
-                 bg=COLORS["panel"], font=("Segoe UI", 9)).pack(anchor="w")
+        tk.Label(speed_container, text="Simulation Speed", fg=COLORS["text_dim"],
+                 bg=COLORS["panel"], font=self.font_label).pack(anchor="center")
         
         slider_row = tk.Frame(speed_container, bg=COLORS["panel"])
-        slider_row.pack(fill=tk.X, pady=5)
-        tk.Label(slider_row, text="🐌", bg=COLORS["panel"], font=("Segoe UI", 12)).pack(side=tk.LEFT)
-        self.speed_slider = ttk.Scale(
-            slider_row, from_=0.1, to=10.0, value=1.0, 
-            orient=tk.HORIZONTAL, command=self._update_speed
+        slider_row.pack(anchor="center", pady=5)
+        # Pixel-art snail/rocket icons from speed.png (already embedded in that image)
+        self._speed_min, self._speed_max = 0.1, 10.0
+        self._speed_val = 1.0
+        self.speed_canvas = tk.Canvas(
+            slider_row, width=240, height=34,
+            bg=COLORS["panel"], highlightthickness=0
         )
-        self.speed_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
-        tk.Label(slider_row, text="🚀", bg=COLORS["panel"], font=("Segoe UI", 12)).pack(side=tk.LEFT)
+        self.speed_canvas.pack(side=tk.LEFT, padx=4)
+        self._spd_bar_id = None
+        self._spd_btn_id = None
+        self.speed_canvas.bind("<ButtonPress-1>",   self._on_speed_click)
+        self.speed_canvas.bind("<B1-Motion>",       self._on_speed_drag)
+        self.speed_canvas.bind("<ButtonRelease-1>", self._on_speed_release)
+        self._draw_speed_bar(self._speed_val)
         
         self.lbl_speed = tk.Label(speed_container, text="1.0x (Real-time)", fg=COLORS["accent"], 
                                   bg=COLORS["panel"], font=self.font_stat)
@@ -218,88 +396,125 @@ class TrafficGUI:
         return val_lbl
 
     def _draw_static_elements(self):
-        """Renders the intersection environment: roads, sidewalks, and markings."""
-        cx, cy, rw = self.CX, self.CY, self.ROAD_W
-        w, h = self.CANVAS_W, self.CANVAS_H
-        
-        # Ground layer
-        self.canvas.create_rectangle(0, 0, w, h, fill=COLORS["grass"], outline="")
-        
-        # Sidewalk logic
-        sw = 15 
-        self.canvas.create_rectangle(0, cy - rw - sw, w, cy - rw, fill=COLORS["SIDEWALK"], outline="")
-        self.canvas.create_rectangle(0, cy + rw, w, cy + rw + sw, fill=COLORS["SIDEWALK"], outline="")
-        self.canvas.create_rectangle(cx - rw - sw, 0, cx - rw, h, fill=COLORS["SIDEWALK"], outline="")
-        self.canvas.create_rectangle(cx + rw, 0, cx + rw + sw, h, fill=COLORS["SIDEWALK"], outline="")
-
-        # Road surface
-        self.canvas.create_rectangle(0, cy - rw, w, cy + rw, fill=COLORS["road"], outline="")
-        self.canvas.create_rectangle(cx - rw, 0, cx + rw, h, fill=COLORS["road"], outline="")
-        self.canvas.create_rectangle(cx - rw, cy - rw, cx + rw, cy + rw, fill=COLORS["road"], outline="")
-
-        # Dashed center lines
-        dash = (15, 15)
-        self.canvas.create_line(cx, 0, cx, cy - rw - 30, fill=COLORS["MARKING"], width=2, dash=dash)
-        self.canvas.create_line(cx, cy + rw + 30, cx, h, fill=COLORS["MARKING"], width=2, dash=dash)
-        self.canvas.create_line(0, cy, cx - rw - 30, cy, fill=COLORS["MARKING"], width=2, dash=dash)
-        self.canvas.create_line(cx + rw + 30, cy, w, cy, fill=COLORS["MARKING"], width=2, dash=dash)
-        
-        # Zebra crossings
-        cw_w, stripe_w, gap = 25, 4, 6
-        for i in range(-rw + 5, rw - 5, stripe_w + gap):
-            self.canvas.create_rectangle(cx + i, cy - rw - cw_w, cx + i + stripe_w, cy - rw - 5, fill=COLORS["MARKING"], outline="")
-            self.canvas.create_rectangle(cx + i, cy + rw + 5, cx + i + stripe_w, cy + rw + cw_w, fill=COLORS["MARKING"], outline="")
-            self.canvas.create_rectangle(cx - rw - cw_w, cy + i, cx - rw - 5, cy + i + stripe_w, fill=COLORS["MARKING"], outline="")
-            self.canvas.create_rectangle(cx + rw + 5, cy + i, cx + rw + cw_w, cy + i + stripe_w, fill=COLORS["MARKING"], outline="")
-
-        # Solid stop lines
-        stop_w = 3
-        self.canvas.create_line(cx, cy - rw - 30, cx + rw, cy - rw - 30, fill=COLORS["MARKING"], width=stop_w)
-        self.canvas.create_line(cx - rw, cy + rw + 30, cx, cy + rw + 30, fill=COLORS["MARKING"], width=stop_w)
-        self.canvas.create_line(cx - rw - 30, cy, cx - rw - 30, cy + rw, fill=COLORS["MARKING"], width=stop_w)
-        self.canvas.create_line(cx + rw + 30, cy - rw, cx + rw + 30, cy, fill=COLORS["MARKING"], width=stop_w)
+        """Draw the background map image, falling back to the old procedural layout."""
+        if self.layout_img:
+            self.canvas.create_image(0, 0, image=self.layout_img, anchor=tk.NW)
+        else:
+            self.canvas.create_rectangle(0, 0, self.CANVAS_W, self.CANVAS_H,
+                                         fill="#0f172a", outline="")
 
     def _draw_traffic_lights(self):
-        """Constructs 'Far-Side Mast Arm' style signal heads for modern realism."""
-        cx, cy, rw = self.CX, self.CY, self.ROAD_W
-        self.lights = {}
-        
-        # Placement configurations for poles and mast arms
+        """Place signal heads at the 4 intersection corners measured from the background image."""
+        w, h = self.CANVAS_W, self.CANVAS_H
+
+        # Corner positions derived from crosswalk-edge ratios (measured from layout-night.png).
+        # Offset outward by 12 px so heads sit just outside the intersection box.
+        off = 12
+        nw = (int(0.3567 * w) - off, int(0.3503 * h) - off)
+        ne = (int(0.6456 * w) + off, int(0.3503 * h) - off)
+        sw = (int(0.3567 * w) - off, int(0.7039 * h) + off)
+        se = (int(0.6456 * w) + off, int(0.7039 * h) + off)
+
+        # Orientations match the reference layout:
+        # NW/NE/SW corners → horizontal (h), SE corner → vertical (v)
         configs = {
-            "North": (cx + rw + 15, cy + rw + 15, cx + 40, cy + rw + 15, "v"),
-            "South": (cx - rw - 15, cy - rw - 15, cx - 40, cy - rw - 15, "v"),
-            "East":  (cx - rw - 15, cy + rw + 15, cx - rw - 15, cy + 40, "h"),
-            "West":  (cx + rw + 15, cy - rw - 15, cx + rw + 15, cy - 40, "h")
+            "North": (*sw, "h"),  # SW corner — horizontal
+            "South": (*ne, "h"),  # NE corner — horizontal
+            "East":  (*nw, "v"),  # NW corner — vertical
+            "West":  (*se, "v"),  # SE corner — vertical
         }
-        
-        for d, (bx, by, ax, ay, orient) in configs.items():
-            # Support pole
-            self.canvas.create_oval(bx-8, by-8, bx+8, by+8, fill="#1e293b", outline="#334155", width=2)
-            self.canvas.create_oval(bx-5, by-5, bx+5, by+5, fill="#475569", outline="#1e293b", width=1)
-            self.canvas.create_line(bx, by, ax, ay, fill="#475569", width=6)
-            
+
+        self.lights = {}
+        for d, (hx, hy, horient) in configs.items():
+            bw, bh = (14, 36) if horient == "v" else (36, 14)
+            self.canvas.create_rectangle(
+                hx - bw/2, hy - bh/2, hx + bw/2, hy + bh/2,
+                fill="#0f172a", outline="#475569", width=2
+            )
             self.lights[d] = {"RED": [], "YELLOW": [], "GREEN": []}
-            hx, hy, horient = bx, by, orient
-            
-            bw, bh = (16, 40) if horient == "v" else (40, 16)
-            self.canvas.create_rectangle(hx-bw/2, hy-bh/2, hx+bw/2, hy+bh/2, fill="#0f172a", outline="#334155", width=2)
-            
-            # Order bulbs logically based on orientation
-            colors = ["GREEN", "YELLOW", "RED"] if d == "South" or horient == "h" else ["RED", "YELLOW", "GREEN"]
-                
+            colors = ["RED", "YELLOW", "GREEN"]
             for i, color in enumerate(colors):
-                lx, ly = (hx, hy - 12 + i * 12) if horient == "v" else (hx - 12 + i * 12, hy)
-                bulb = self.canvas.create_oval(lx-5, ly-5, lx+5, ly+5, fill=COLORS["OFF"], outline="#1e293b", width=1)
+                lx = hx if horient == "v" else hx - 10 + i * 10
+                ly = hy - 10 + i * 10 if horient == "v" else hy
+                bulb = self.canvas.create_oval(
+                    lx-5, ly-5, lx+5, ly+5,
+                    fill=COLORS["OFF"], outline="#1e293b", width=1
+                )
                 self.lights[d][color].append(bulb)
 
     def _toggle_pause(self):
         self.paused = not self.paused
-        self.btn_pause.config(text="▶ RESUME" if self.paused else "⏸ PAUSE",
-                               bg=COLORS["YELLOW"] if self.paused else COLORS["accent"])
+        if self.img_start and self.img_pause:
+            self.btn_pause.config(image=self.img_start if self.paused else self.img_pause)
+        else:
+            self.btn_pause.config(text="▶ RESUME" if self.paused else "⏸ PAUSE",
+                                   bg=COLORS["YELLOW"] if self.paused else COLORS["accent"])
+
+    def _draw_speed_bar(self, value):
+        """Draw the pixel-art speed bar: dark-blue→light-blue gradient fill + button."""
+        sc = self.speed_canvas
+        sc.delete("spd_fill")
+
+        # Interior fill bounds (scanned from 240×34 scaled speed.png)
+        x0, y0, x1, y1 = 42, 14, 202, 25
+        fill_w = x1 - x0  # 160 px
+
+        pct = (value - self._speed_min) / (self._speed_max - self._speed_min)
+        filled_w = fill_w * pct
+        n = 40
+
+        for i in range(n):
+            sx0 = x0 + i * fill_w / n
+            sx1 = x0 + min((i + 1) * fill_w / n, filled_w)
+            if sx1 <= sx0:
+                break
+            t = i / (n - 1) if n > 1 else 0
+            # dark blue #1e3a6e → light blue #5baad8
+            r = int(0x1e + (0x5b - 0x1e) * t)
+            g = int(0x3a + (0xaa - 0x3a) * t)
+            b = int(0x6e + (0xd8 - 0x6e) * t)
+            sc.create_rectangle(sx0, y0, sx1, y1,
+                                fill=f"#{r:02x}{g:02x}{b:02x}", outline="",
+                                tags="spd_fill")
+
+        # Overlay the frame image
+        if self.speed_bar_img:
+            if self._spd_bar_id:
+                sc.delete(self._spd_bar_id)
+            self._spd_bar_id = sc.create_image(0, 0, image=self.speed_bar_img, anchor=tk.NW)
+
+        # Draw the thumb button at the filled position
+        btn_x = x0 + int(filled_w)
+        btn_y = (y0 + y1) // 2
+        if self.speed_btn_img:
+            if self._spd_btn_id:
+                sc.delete(self._spd_btn_id)
+            self._spd_btn_id = sc.create_image(btn_x, btn_y, image=self.speed_btn_img,
+                                               anchor=tk.CENTER, tags="spd_fill")
+            sc.tag_raise(self._spd_btn_id)
+
+    def _speed_from_x(self, x):
+        x0, x1 = 42, 202
+        pct = max(0.0, min(1.0, (x - x0) / (x1 - x0)))
+        return self._speed_min + pct * (self._speed_max - self._speed_min)
+
+    def _on_speed_click(self, event):
+        val = self._speed_from_x(event.x)
+        self._update_speed(val)
+
+    def _on_speed_drag(self, event):
+        val = self._speed_from_x(event.x)
+        self._update_speed(val)
+
+    def _on_speed_release(self, event):
+        val = self._speed_from_x(event.x)
+        self._update_speed(val)
 
     def _update_speed(self, val):
-        self.speed_multiplier = float(val)
+        self._speed_val = float(val)
+        self.speed_multiplier = self._speed_val
         self.lbl_speed.config(text=f"{self.speed_multiplier:.1f}x")
+        self._draw_speed_bar(self._speed_val)
 
     def _schedule_update(self):
         """The main animation ticker. Drives the simulation engine and redraws the canvas."""
@@ -359,7 +574,7 @@ class TrafficGUI:
         self.stat_avg_wait.config(text=f"{res['avg_wait_time']:.1f}s")
         
         pct = min(int(now / total * 100), 100)
-        self.progress["value"] = pct
+        self._draw_progress_bar(pct)
         self.lbl_progress.config(text=f"{pct}%")
 
         for d in DIRECTIONS:
@@ -376,8 +591,11 @@ class TrafficGUI:
         my_lane = getattr(vehicle, 'lane', 0)
         my_height = VEHICLE_CONFIGS[getattr(vehicle, 'v_type', 'car')]["height"]
         
-        stop_line_dist = 115
-        gap = 10
+        if direction in ("North", "South"):
+            stop_line_dist = self.STOP_NS
+        else:
+            stop_line_dist = self.STOP_EW
+        gap = 12
         
         # Collect heights of vehicles AHEAD in the SAME lane
         ahead_heights = []
@@ -429,7 +647,7 @@ class TrafficGUI:
                 ahead_v = current_pos[ahead_vid]
                 ahead_length = VEHICLE_CONFIGS[ahead_v['type']]["height"]
                 my_length = VEHICLE_CONFIGS[v['type']]["height"]
-                gap_size = 10 + ahead_length / 2 + my_length / 2
+                gap_size = 12 + ahead_length / 2 + my_length / 2
                 
                 if v['dir'] == "North": ahead_limit = ahead_v['y'] - gap_size
                 elif v['dir'] == "South": ahead_limit = ahead_v['y'] + gap_size
@@ -490,7 +708,7 @@ class TrafficGUI:
             if ahead_vid is not None and ahead_vid in current_pos:
                 ahead_v = current_pos[ahead_vid]
                 ahead_length = VEHICLE_CONFIGS[ahead_v['type']]["height"]
-                gap_size = 10 + ahead_length / 2 + my_length / 2
+                gap_size = 12 + ahead_length / 2 + my_length / 2
                 if d == "North": ahead_limit = ahead_v['y'] - gap_size
                 elif d == "South": ahead_limit = ahead_v['y'] + gap_size
                 elif d == "East": ahead_limit = ahead_v['x'] + gap_size
@@ -544,7 +762,10 @@ class TrafficGUI:
             return
             
         if not hasattr(vehicle_obj, 'v_type'):
-            vehicle_obj.v_type = random.choice(["car", "car", "car", "van", "truck"])
+            vehicle_obj.v_type = random.choice([
+                "car", "car", "car", "van", "truck",
+                "jeep", "jeep", "bus", "tricycle", "tricycle",
+            ])
         if not hasattr(vehicle_obj, 'color'):
             vehicle_obj.color = random.choice(VEHICLE_PALETTE)
         
@@ -562,7 +783,7 @@ class TrafficGUI:
         }
         
         # Lane offsets: 2 lanes per direction, each 40px wide within the 80px half-road
-        l1, l2 = 20, 55
+        l1, l2 = self.LANE_1, self.LANE_2
         off = l1 if lane_id == 0 else l2
         
         margin = 30
@@ -611,9 +832,9 @@ class TrafficGUI:
                 v_type = getattr(departed_v, 'v_type', 'car')
                 v_color = getattr(departed_v, 'color', random.choice(VEHICLE_PALETTE))
                 
-                l1, l2 = 20, 55
+                l1, l2 = self.LANE_1, self.LANE_2
                 off = l1 if lane_id == 0 else l2
-                stop_dist = 115  # Match the stop_line_dist from _get_stop_distance
+                stop_dist = self.STOP_NS if direction in ("North", "South") else self.STOP_EW
                 if direction == "North": start_x, start_y = cx + off, cy - stop_dist
                 elif direction == "South": start_x, start_y = cx - off, cy + stop_dist
                 elif direction == "East": start_x, start_y = cx + stop_dist, cy - off
@@ -682,7 +903,7 @@ class TrafficGUI:
                 
                 # Use permanent lane from vehicle object
                 lane_id = getattr(vobj, 'lane', 0)
-                l1, l2 = 20, 55
+                l1, l2 = self.LANE_1, self.LANE_2
                 off = l1 if lane_id == 0 else l2
                 
                 if d == "North": x, y, orient = cx + off, cy - dist, "v"
@@ -690,13 +911,13 @@ class TrafficGUI:
                 elif d == "East": x, y, orient = cx + dist, cy - off, "h"
                 else: x, y, orient = cx - dist, cy + off, "h"
                 
-                self._update_or_create_car(v_id, x, y, orient, vobj.color, vobj.v_type)
+                self._update_or_create_car(v_id, x, y, orient, vobj.color, vobj.v_type, direction=d)
 
         # Render moving vehicles
         for v_list in [self.passing_vehicles, self.arriving_vehicles]:
             for v in v_list:
                 active_ids.add(v['id'])
-                self._update_or_create_car(v['id'], v['x'], v['y'], v['orient'], v['color'], v['type'])
+                self._update_or_create_car(v['id'], v['x'], v['y'], v['orient'], v['color'], v['type'], direction=v['dir'])
 
         # Garbage collect sprites for vehicles that left the map
         for vid in list(self.anim_objects.keys()):
@@ -705,54 +926,97 @@ class TrafficGUI:
                     self.canvas.delete(item)
                 del self.anim_objects[vid]
 
-    def _update_or_create_car(self, vid, x, y, orient, color, v_type="car"):
-        """Draws/moves a vehicle sprite including details like headlights and windshields."""
+    def _update_or_create_car(self, vid, x, y, orient, color, v_type="car", direction=None):
+        """Draws/moves a vehicle sprite. Uses a PNG asset when available, else draws shapes."""
         cfg = VEHICLE_CONFIGS.get(v_type, VEHICLE_CONFIGS["car"])
         w, h = (cfg["width"], cfg["height"]) if orient == "v" else (cfg["height"], cfg["width"])
-        
+
+        img = (self.vehicle_images.get(v_type) or self.vehicle_images.get("car", {})).get(direction) \
+              if direction else None
+
         if vid not in self.anim_objects:
-            body = self.canvas.create_rectangle(x-w/2, y-h/2, x+w/2, y+h/2, fill=color, outline="#000", width=1)
-            items = [body]
-            
-            if orient == "v":
-                # Windshield & Roof
-                items.append(self.canvas.create_rectangle(x-w*0.35, y-h*0.2, x+w*0.35, y+h*0.1, fill="#1e293b", outline=""))
-                # Headlights (front)
-                items.append(self.canvas.create_oval(x-w*0.4, y-h*0.45, x-w*0.1, y-h*0.35, fill="#fff", outline=""))
-                items.append(self.canvas.create_oval(x+w*0.1, y-h*0.45, x+w*0.4, y-h*0.35, fill="#fff", outline=""))
-                # Brake lights (back)
-                items.append(self.canvas.create_rectangle(x-w*0.4, y+h*0.4, x-w*0.2, y+h*0.45, fill="#ef4444", outline=""))
-                items.append(self.canvas.create_rectangle(x+w*0.2, y+h*0.4, x+w*0.4, y+h*0.45, fill="#ef4444", outline=""))
+            if img:
+                item = self.canvas.create_image(x, y, image=img, anchor=tk.CENTER)
+                items = [item]
             else:
-                items.append(self.canvas.create_rectangle(x-w*0.2, y-h*0.35, x+w*0.1, y+h*0.35, fill="#1e293b", outline=""))
-                items.append(self.canvas.create_oval(x+w*0.35, y-h*0.4, x+w*0.45, y-h*0.1, fill="#fff", outline=""))
-                items.append(self.canvas.create_oval(x+w*0.35, y+h*0.1, x+w*0.45, y+h*0.4, fill="#fff", outline=""))
-                items.append(self.canvas.create_rectangle(x-w*0.45, y-h*0.4, x-w*0.4, y-h*0.2, fill="#ef4444", outline=""))
-                items.append(self.canvas.create_rectangle(x-w*0.45, y+h*0.2, x-w*0.4, y+h*0.4, fill="#ef4444", outline=""))
-            
+                body = self.canvas.create_rectangle(x-w/2, y-h/2, x+w/2, y+h/2, fill=color, outline="#000", width=1)
+                items = [body]
+                if orient == "v":
+                    items.append(self.canvas.create_rectangle(x-w*0.35, y-h*0.2, x+w*0.35, y+h*0.1, fill="#1e293b", outline=""))
+                    items.append(self.canvas.create_oval(x-w*0.4, y-h*0.45, x-w*0.1, y-h*0.35, fill="#fff", outline=""))
+                    items.append(self.canvas.create_oval(x+w*0.1, y-h*0.45, x+w*0.4, y-h*0.35, fill="#fff", outline=""))
+                    items.append(self.canvas.create_rectangle(x-w*0.4, y+h*0.4, x-w*0.2, y+h*0.45, fill="#ef4444", outline=""))
+                    items.append(self.canvas.create_rectangle(x+w*0.2, y+h*0.4, x+w*0.4, y+h*0.45, fill="#ef4444", outline=""))
+                else:
+                    items.append(self.canvas.create_rectangle(x-w*0.2, y-h*0.35, x+w*0.1, y+h*0.35, fill="#1e293b", outline=""))
+                    items.append(self.canvas.create_oval(x+w*0.35, y-h*0.4, x+w*0.45, y-h*0.1, fill="#fff", outline=""))
+                    items.append(self.canvas.create_oval(x+w*0.35, y+h*0.1, x+w*0.45, y+h*0.4, fill="#fff", outline=""))
+                    items.append(self.canvas.create_rectangle(x-w*0.45, y-h*0.4, x-w*0.4, y-h*0.2, fill="#ef4444", outline=""))
+                    items.append(self.canvas.create_rectangle(x-w*0.45, y+h*0.2, x-w*0.4, y+h*0.4, fill="#ef4444", outline=""))
+
             self.anim_objects[vid] = items
             for item in items: self.canvas.tag_raise(item)
         else:
-            # Shift existing items to new coords
             items = self.anim_objects[vid]
-            self.canvas.coords(items[0], x-w/2, y-h/2, x+w/2, y+h/2)
-            if orient == "v":
-                self.canvas.coords(items[1], x-w*0.35, y-h*0.2, x+w*0.35, y+h*0.1)
-                self.canvas.coords(items[2], x-w*0.4, y-h*0.45, x-w*0.1, y-h*0.35)
-                self.canvas.coords(items[3], x+w*0.1, y-h*0.45, x+w*0.4, y-h*0.35)
-                self.canvas.coords(items[4], x-w*0.4, y+h*0.4, x-w*0.2, y+h*0.45)
-                self.canvas.coords(items[5], x+w*0.2, y+h*0.4, x+w*0.4, y+h*0.45)
+            if len(items) == 1:
+                # PNG sprite — just move it
+                self.canvas.coords(items[0], x, y)
             else:
-                self.canvas.coords(items[1], x-w*0.2, y-h*0.35, x+w*0.1, y+h*0.35)
-                self.canvas.coords(items[2], x+w*0.35, y-h*0.4, x+w*0.45, y-h*0.1)
-                self.canvas.coords(items[3], x+w*0.35, y+h*0.1, x+w*0.45, y+h*0.4)
-                self.canvas.coords(items[4], x-w*0.45, y-h*0.4, x-w*0.4, y-h*0.2)
-                self.canvas.coords(items[5], x-w*0.45, y+h*0.2, x-w*0.4, y+h*0.4)
+                self.canvas.coords(items[0], x-w/2, y-h/2, x+w/2, y+h/2)
+                if orient == "v":
+                    self.canvas.coords(items[1], x-w*0.35, y-h*0.2, x+w*0.35, y+h*0.1)
+                    self.canvas.coords(items[2], x-w*0.4, y-h*0.45, x-w*0.1, y-h*0.35)
+                    self.canvas.coords(items[3], x+w*0.1, y-h*0.45, x+w*0.4, y-h*0.35)
+                    self.canvas.coords(items[4], x-w*0.4, y+h*0.4, x-w*0.2, y+h*0.45)
+                    self.canvas.coords(items[5], x+w*0.2, y+h*0.4, x+w*0.4, y+h*0.45)
+                else:
+                    self.canvas.coords(items[1], x-w*0.2, y-h*0.35, x+w*0.1, y+h*0.35)
+                    self.canvas.coords(items[2], x+w*0.35, y-h*0.4, x+w*0.45, y-h*0.1)
+                    self.canvas.coords(items[3], x+w*0.35, y+h*0.1, x+w*0.45, y+h*0.4)
+                    self.canvas.coords(items[4], x-w*0.45, y-h*0.4, x-w*0.4, y-h*0.2)
+                    self.canvas.coords(items[5], x-w*0.45, y+h*0.2, x-w*0.4, y+h*0.4)
             for item in items: self.canvas.tag_raise(item)
+
+    def _draw_progress_bar(self, pct):
+        """Fill the pixel-art progress bar with a red→yellow gradient up to pct%."""
+        if not self.progress_canvas:
+            self.progress["value"] = pct
+            return
+
+        # True interior found by scanning the scaled 240×40 image directly:
+        # outer border x=19-27, gap x=28-31, inner border x=32-35, interior x=36-213
+        x0, y0, x1, y1 = 36, 11, 213, 30
+        fill_w = x1 - x0        # 177 px of fillable interior
+        filled_w = fill_w * pct / 100
+
+        self.progress_canvas.delete("gradient")
+
+        n = 50  # number of gradient segments
+        seg_w = fill_w / n
+        for i in range(n):
+            sx0 = x0 + i * seg_w
+            sx1 = x0 + min((i + 1) * seg_w, filled_w)
+            if sx1 <= sx0:
+                break
+            t = i / (n - 1) if n > 1 else 0
+            # red #ef4444 (239,68,68) → yellow #f59e0b (245,158,11)
+            r = int(239 + 6 * t)
+            g = int(68 + 90 * t)
+            b = int(68 - 57 * t)
+            self.progress_canvas.create_rectangle(
+                sx0, y0, sx1, y1,
+                fill=f"#{r:02x}{g:02x}{b:02x}", outline="", tags="gradient"
+            )
+
+        # Keep the PNG frame on top so its opaque border covers the gradient edges
+        self.progress_canvas.tag_raise(self._bar_frame_id)
 
     def _handle_completion(self):
         self.paused = True
-        self.btn_pause.config(text="FINISHED", state=tk.DISABLED, bg="#475569")
+        if self.img_start:
+            self.btn_pause.config(image=self.img_start, state=tk.DISABLED)
+        else:
+            self.btn_pause.config(text="FINISHED", state=tk.DISABLED, bg="#475569")
         messagebox.showinfo("Simulation Complete", 
                                f"The simulation has finished.\nTotal Vehicles: {self.sim.stats['total_arrived']}\nAvg Wait Time: {self.sim.get_results()['avg_wait_time']:.2f}s")
 
